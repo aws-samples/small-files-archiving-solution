@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 '''
 ChangeLogs
+- 2023.01.14:
+    - adding md5 hash in manifest
 - 2022.10.07: 
     - create manifest before tar archiving
 '''
 
 #requirement
 ## python 3.7+ (os.name)
-## boto3
-## preferred os: linux (Windows works as well, but performance is slower)
+## boto3(not needed)
+## tested on Amazonlinux2
 
 import os
 import subprocess
@@ -26,6 +28,7 @@ import tarfile
 import traceback
 import argparse
 import shutil
+import hashlib
 
 ## treating arguments
 parser = argparse.ArgumentParser()
@@ -68,16 +71,18 @@ contents_log_dir = contents_dir + '/' + 'list'
 
 ##### Optional variables
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-cmd='upload_sbe' ## supported_cmd: 'download|del_obj_version|restore_obj_version'
+cmd='store_in_filesystem' ## supported_cmd: 'download|del_obj_version|restore_obj_version'
 # create log directory
 try:
     os.makedirs(contents_log_dir)
 except: 
-    print('failed to create %s', contents_log_dir)
+    pass
+    #print('failed to create %s', contents_log_dir)
 try:
     os.makedirs('list')
 except: 
-    print('failed to create list dir')
+    pass
+    #print('failed to create list dir')
 errorlog_file = 'list/error-%s.log' % current_time
 successlog_file = 'list/success-%s.log' % current_time
 quit_flag = 'DONE'
@@ -113,20 +118,33 @@ if not os.path.isdir(nfs_dir):
     print(nfs_dir + " does not exist")
     exit()
 
+## start of functions
+# create md5hash 
+def md5hash(filename):
+    md5_hash = hashlib.md5()
+    with open(filename,"rb") as f:
+        # Read and update hash in chunks of 4K
+        for byte_block in iter(lambda: f.read(4096),b""):
+            md5_hash.update(byte_block)
+        readable_hash = md5_hash.hexdigest()
+    return readable_hash
 ## create manifest file
 def create_manifest(tar_name, org_files_list, manifest_name):
     delimeter = '|'
     with open(manifest_name, 'a') as manifest_log:
-            for file_name, obj_name in org_files_list:
-                    content_log = tar_name + delimeter \
-                                + file_name + delimeter \
-                                + year + delimeter \
-                                + month + delimeter \
-                                + day \
-                                + '\n'
+        for file_name, obj_name in org_files_list:
+            # get md5hash from each file
+            md5 = md5hash(file_name)
+            content_log = tar_name + delimeter \
+                + file_name + delimeter \
+                + year + delimeter \
+                + month + delimeter \
+                + day + delimeter \
+                + md5 \
+                + '\n'
 #                                + obj_name + delimeter
 #                                + str(file_size)
-                    manifest_log.write(content_log)
+            manifest_log.write(content_log)
 
 ## code from snowball_uploader
 def archive_to_fs(tar_name, org_files_list):
@@ -149,18 +167,6 @@ def archive_to_fs(tar_name, org_files_list):
             except:
                 error_log.info("%s is ignored" % file_name)
     success_log.info('%s is archived successfully\n' % tar_name)
-
-    ## when using os.system
-    #file_args = ''
-    #for file, obj in org_files_list:
-    #    file_args = file_args + ' ' + file
-    ##subprocess.call(f'tar -cf {tarfile_full_name} {file_args}', shell=True)
-    #os.system('tar -cf %s %s'%(tarfile_full_name, file_args))
-    #org_files_list = []
-    #success_log.info('%s is archived successfully\n' % tar_name)
-    ##
-    #print('metadata info: %s\n' % str(meta_out))
-    #print('%s is uploaded successfully\n' % tar_name)
     return collected_files_no
 ## end of code from snowball_uploader
 
@@ -319,6 +325,7 @@ def result_log(start_time, total_files, contents_dir):
     success_log.info('END')
     success_log.info('====================================')
 
+
 # start main function
 if __name__ == '__main__':
 
@@ -330,18 +337,9 @@ if __name__ == '__main__':
     src_dir = prefix_list
     check_srcdir(src_dir)
 
-    if cmd == 'upload_sbe':
+    if cmd == 'store_in_filesystem':
         total_files = upload_file_multi(src_dir)
         result_log(start_time, total_files, contents_dir)
         upload_log()
     else:
         s3_booster_help
-
-    #print('====================================')
-    ##for d in down_dir:
-    ##    stored_dir = local_dir + d
-    ##    print("[Information] Download completed, data stored in %s" % stored_dir)
-    #print('Duration: {}'.format(end_time - start_time))
-    #print('Scanned File numbers: %d' % total_files) 
-    #print('End')
-    #print('====================================')
