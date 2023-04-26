@@ -90,13 +90,14 @@ year = str(today.year)
 month= str(today.month)
 day = str(today.day)
 fs_dir = args.fs_dir
+log_dir = 'logs'
 if protocol == 's3':
     contents_dir = ''
-    contents_log_dir = 'logs/'
+    contents_log_dir = log_dir
 elif protocol == 'fs':
     contents_dir = fs_dir + '/' + year + '/' + month + '/' + day
     #contents_dir = fs_dir 
-    contents_log_dir = contents_dir + '/' + 'logs'
+    contents_log_dir = contents_dir + '/' + log_dir
 # end of user variables ## you don't need to modify below codes.
 
 ##### Optional variables
@@ -106,11 +107,11 @@ cmd='upload_sbe' ## supported_cmd: 'download|del_obj_version|restore_obj_version
 try:
     os.makedirs(contents_log_dir)
 except: 
-    print('not create ', contents_log_dir)
+    print('ignoring to create ', contents_log_dir)
 try:
-    os.makedirs('logs')
+    os.makedirs(log_dir)
 except: 
-    print('not create logs dir')
+    pass
 errorlog_file = 'logs/error-%s.log' % current_time
 successlog_file = 'logs/success-%s.log' % current_time
 quit_flag = 'DONE'
@@ -328,7 +329,15 @@ def get_files(sub_prefix, q):
                     f_size = os.stat(file_name).st_size
                     size_or_num = size_or_num + f_size
                 else:
+                    f_size = os.stat(file_name).st_size
                     size_or_num += 1
+                """ commented 2023.04.26
+                if combine == 'size':
+                    f_size = os.stat(file_name).st_size
+                    size_or_num = size_or_num + f_size
+                else:
+                    size_or_num += 1
+                """
                 file_info = (file_name, obj_name, f_size)
                 #file_info = (file_name, obj_name)
                 org_files_list.append(file_info)
@@ -407,9 +416,7 @@ def upload_log():
             for file in f:
                 try:
                     file_name = os.path.join(r,file)
-                    print('file:', file)
-                    key_name = str('logs/'+file)
-                    print('keyname: ', key_name)
+                    key_name = str(log_dir +'/'+file)
                     s3_client.upload_file(file_name, bucket_name, key_name)
                 except Exception as e:
                     error_log.info('exception error: uploading log failed')
@@ -428,12 +435,20 @@ def result_log(start_time, total_files, contents_dir):
         size_or_num = max_tarfile_size
     else:
         size_or_num = max_file_number
+
+    if protocol == 's3':
+        dest_location = bucket_name
+    elif protocol == 'fs':
+        dest_location = contents_dir
+    else:
+        error_log.info('dest_location is not defined')
+        
     success_log.info('====================================')
     success_log.info('Combine: %s' % combine)
     success_log.info('size or count: %s' % size_or_num)
     success_log.info('Duration: {}'.format(end_time - start_time))
     success_log.info('Scanned file numbers: %d' % total_files) 
-    success_log.info('TAR files location: %s' % contents_dir)
+    success_log.info('TAR files location: %s' % dest_location)
     success_log.info('END')
     success_log.info('====================================')
 
