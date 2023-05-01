@@ -222,7 +222,7 @@ However, if we need only a few of files, downloading entire 10GB tarfile is not 
 ### Running get_tar_part.py
 This [get_tar_part.py](https://github.com/aws-samples/small-files-archiving-solution/blob/main/get_bytes_range/get_tar_part.py) script will download the subset file and extract it in current directory. As well, you can specify sequencial blocks of multiple files.
 ```
-python3 $cmd --bucket_name 'your-own-dest-repo' --key_name 'archive_20230501_110237_36WP7R.tar' --start_byte '2056192' --stop_byte '2113534'
+python3 get_tar_part.py --bucket_name 'your-own-dest-repo' --key_name 'archive_20230501_110237_36WP7R.tar' --start_byte '2056192' --stop_byte '2113534'
 ```
 - --bucket_name: bucket name which is storing tarfile
 - --key_name: tarfile name which found from previous Athena query
@@ -252,8 +252,7 @@ As an example, I modified --stop_byte to 2113534 intentionlly even though proper
 
 cat run_get_tar_part.sh
 ```
-cmd='get_tar_part.py'
-python3 $cmd --bucket_name 'your-own-dest-seoul' --key_name 'archive_20230501_110237_36WP7R.tar' --start_byte '2056192' --stop_byte '2113534'
+python3 get_tar_part.py --bucket_name 'your-own-dest-repo' --key_name 'archive_20230501_110237_36WP7R.tar' --start_byte '2056192' --stop_byte '2113534'
 ```
 
 You can see warning message and incompleted tarfile.
