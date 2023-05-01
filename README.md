@@ -8,7 +8,7 @@ This feature will help user reduce cloud storage cost reducing PUT request cost,
 - Generating tarfiles and saving to filesystem directory
 - Providing manifest files which is including tarfile, subset file, date, file size, first block, last block
 - Finding tarfiles which includes specific subset file by condition, such as filename, date, duration
-- Retrieving subset file itself from a tarfile in S3 using [bytes-range](https://docs.aws.amazon.com/whitepapers/latest/s3-optimizing-performance-best-practices/use-byte-range-fetches.html)
+- Retrieving subset file itself from a tarfile in S3 using [byte-range](https://docs.aws.amazon.com/whitepapers/latest/s3-optimizing-performance-best-practices/use-byte-range-fetches.html)
 
 ## Pre-requsites
 - python >= 3.7
@@ -213,7 +213,7 @@ select * from image_archiving where month=09 and (day >= 16 and day <= 18) limit
 ![athena-2](images/athena-2.png)
 
 
-## Retrieving subset file itself from a tarfile in S3 using [bytes-range](https://docs.aws.amazon.com/whitepapers/latest/s3-optimizing-performance-best-practices/use-byte-range-fetches.html)
+## Retrieving subset file itself from a tarfile in S3 using [byte-range](https://docs.aws.amazon.com/whitepapers/latest/s3-optimizing-performance-best-practices/use-byte-range-fetches.html)
 After finding out the TAR file which containing specific object, user can retrieve that TAR file using AWS CLI or AWS management console, and then, user should extract TAR file to get target file.
 ![athena-3](images/athena-3.png)
 
