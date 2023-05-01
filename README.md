@@ -217,10 +217,10 @@ select * from image_archiving where month=09 and (day >= 16 and day <= 18) limit
 After finding out the TAR file which containing specific object, user can retrieve that TAR file using AWS CLI or AWS management console, and then, user should extract TAR file to get target file.
 ![athena-3](images/athena-3.png)
 
-However, if we need only a few of files, downloading 10GB tarfile file is not efficient. In this case, we can use byte-range feature of Amazon S3. for your convinience, I made simple script for it, [get_tar_part.py](https://github.com/aws-samples/small-files-archiving-solution/blob/main/get_bytes_range/get_tar_part.py).
+However, if we need only a few of files, downloading entire 10GB tarfile is not efficient. In this case, we can use byte-range feature of Amazon S3. for your convinience, I made simple script for it, [get_tar_part.py](https://github.com/aws-samples/small-files-archiving-solution/blob/main/get_bytes_range/get_tar_part.py).
 
 ### Running get_tar_part.py
-This get_tar_part.py script will download the subset file and extract it in current directory. As well, you can specify sequencial blocks of multiple files.
+This [get_tar_part.py](https://github.com/aws-samples/small-files-archiving-solution/blob/main/get_bytes_range/get_tar_part.py) script will download the subset file and extract it in current directory. As well, you can specify sequencial blocks of multiple files.
 ```
 python3 $cmd --bucket_name 'your-own-dest-repo' --key_name 'archive_20230501_110237_36WP7R.tar' --start_byte '2056192' --stop_byte '2113534'
 ```
@@ -228,8 +228,6 @@ python3 $cmd --bucket_name 'your-own-dest-repo' --key_name 'archive_20230501_110
 - --key_name: tarfile name which found from previous Athena query
 - --start_byte: subset file's start block written on manifest file
 - --stop_byte: subset file's las block written on manifest file
-
-
 
 #### Result of script
 When script is finished, we can see extracted file names.
