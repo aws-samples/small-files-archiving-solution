@@ -187,7 +187,7 @@ Sometimes, we have to download some files from Amazon S3 to validate the product
 In order to search an object in manifest file, the first job is to create an external table with Athena query. It will create table schema based on contents of manifest files. Below is the sample query to create external table.
 
 ```bash
- CREATE EXTERNAL TABLE IF NOT EXISTS image_archiving ( tarname string, filename string, month int, day int) ROW FORMAT DELIMITED FIELDS TERMINATED BY '|' ESCAPED BY '\\' LINES TERMINATED BY '\n' LOCATION 's3://archived-0918/09/16/lists/'
+ CREATE EXTERNAL TABLE IF NOT EXISTS image_archiving ( tarname string, filename string, month int, day int, size int, start_byte int, stop_byte int) ROW FORMAT DELIMITED FIELDS TERMINATED BY '|' ESCAPED BY '\\' LINES TERMINATED BY '\n' LOCATION 's3://your-own-dest-repo/lists/'
 ```
 
 ![athena-1](images/athena-1.png)
