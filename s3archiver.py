@@ -227,7 +227,7 @@ def copy_to_s3(tar_name, org_files_list):
     # uploading to S3
     tar_full_name = bucket_prefix + tar_name
     s3_client.upload_fileobj(recv_buf, bucket_name, tar_full_name, ExtraArgs={'Metadata': {'archived': 'true'},'StorageClass': storage_class}, Config=transfer_config)
-    s3_client.upload_file(manifest_name, bucket_name, manifest_key, ExtraArgs={'Metadata': {'archived': 'true'},'StorageClass': storage_class}, Config=transfer_config)
+    s3_client.upload_file(manifest_name, bucket_name, manifest_key, ExtraArgs={'Metadata': {'archived': 'true'},'StorageClass': 'STANDARD'}, Config=transfer_config)
     ### print metadata
     meta_out = s3_client.head_object(Bucket=bucket_name, Key=tar_full_name)
     success_log.info('meta info: %s ',str(meta_out))
