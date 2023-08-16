@@ -224,13 +224,12 @@ def copy_to_s3(tar_name, org_files_list):
                                 + day + delimeter \
                                 + str(file_size) + delimeter \
                                 + str(tar_cur_pos) + delimeter \
-                                + md5 \
                     # perform TAR operation
                     tar.add(file_name, arcname=obj_name)
                     collected_files_no += 1
                     # adding manifest info
                     tar_end_pos = recv_buf.tell() - 1
-                    content_log = content_log + str(tar_end_pos) + '\n'
+                    content_log = content_log + str(tar_end_pos) + delimeter + md5 +'\n'
                 except Exception as e:
                     error_log.info("%s is ignored" % file_name)
                     error_log.info(e)
@@ -281,13 +280,12 @@ def archive_to_fs(tar_name, org_files_list):
                                 + day + delimeter \
                                 + str(file_size) + delimeter \
                                 + str(tar_cur_pos) + delimeter \
-                                + md5 \
                     # perform TAR operation
                     tar.add(file_name, arcname=obj_name)
                     collected_files_no += 1
                     # adding manifest info
                     tar_end_pos = recv_buf.tell() - 1
-                    content_log = content_log + str(tar_end_pos) + '\n'
+                    content_log = content_log + str(tar_end_pos) + delimeter + md5 +'\n'
                 except Exception as e:
                     error_log.info("%s is ignored" % file_name)
                     error_log.info(e)
