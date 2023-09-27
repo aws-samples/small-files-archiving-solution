@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 '''
 ChangeLogs
+- 2023.09.27:
+    - supporting input_file (not completed)
+- 2023.09.27:
+    - create function: create_manifest_tarfile()
 - 2023.04.24:
     - add feature to upload s3 directly
-    - (not impleted))adding byte offset
-- 2022.10.07: 
-    - create manifest before tar archiving
+    - adding byte offset
 '''
 
 #requirement
@@ -43,16 +45,17 @@ parser.add_argument('--max_process', help='NUM e) 5', action='store', default=5,
 parser.add_argument('--combine', help='size | count, if you combind files based on tarfile size, select \'size\', or if you combine files based on file count, select \'count\'', action='store', default='count', required=True)
 parser.add_argument('--max_file_number', help='max files in one tarfile', action='store', default=1000, type=int)
 parser.add_argument('--max_tarfile_size', help='NUM bytes e) $((1*(1024**3))) #1GB for < total 50GB, 10GB for >total 50GB', action='store', default=10*(1024**3), type=int)
-
 ## for s3 protocol
 parser.add_argument('--bucket_name', help='your bucket name e) your-bucket', action='store', required=False)
 parser.add_argument('--endpoint', help='snowball endpoint e) http://10.10.10.10:8080 or https://s3.ap-northeast-2.amazonaws.com', action='store', default='https://s3.ap-northeast-2.amazonaws.com', required=False)
 parser.add_argument('--profile_name', help='aws_profile_name e) sbe1', action='store', default='default')
 parser.add_argument('--storage_class', help='specify S3 classes, be cautious Snowball support only STANDARD class; StorageClass=STANDARD|REDUCED_REDUNDANCY|STANDARD_IA|ONEZONE_IA|INTELLIGENT_TIERING|GLACIER|DEEP_ARCHIVE|OUTPOSTS|GLACIER_IR', action='store', default='STANDARD')
 parser.add_argument('--bucket_prefix', help='prefix of object in the bucket', action='store', default='')
-
 ### for fs protocol
 parser.add_argument('--fs_dir', help='specify fs mounting point when protocol is fs ', action='store', default='/mnt/fs')
+### for input_file
+parser.add_argument('--input_file', help='specify input_file instead of scanning filesystem, line seperated', action='store', default='')
+## end of argments
 args = parser.parse_args()
 
 ## set to variable
@@ -69,6 +72,7 @@ max_tarfile_size = args.max_tarfile_size # 10GiB, 100GiB is max limit of snowbal
 max_file_number = args.max_file_number # 10GiB, 100GiB is max limit of snowball
 bucket_prefix = args.bucket_prefix
 log_level = logging.INFO ## DEBUG, INFO, WARNING, ERROR
+input_file = args.input_file
 
 # S3 TransferConfig
 KB = 1024
@@ -180,39 +184,20 @@ if protocol == 'fs':
         print(fs_dir + " does not exist")
         exit()
 
-## create manifest file
-#def create_manifest(tar_name, org_files_list, manifest_name):
-#    delimeter = '|'
-#    with open(manifest_name, 'a') as manifest_log:
-#            for file_name, obj_name, file_size in org_files_list:
-#                    content_log = tar_name + delimeter \
-#                                + file_name + delimeter \
-#                                + year + delimeter \
-#                                + month + delimeter \
-#                                + day + delimeter \
-#                                + str(file_size) \
-#                                + '\n'
-##                                + obj_name + delimeter
-##                                + str(file_size)
-#                    manifest_log.write(content_log)
-
-## upload to S3
-def copy_to_s3(tar_name, org_files_list):
+## create manifest file and tarfile
+def create_manifest_and_tarfile(tar_name, org_files_list, manifest_name, recv_buf):
     global bucket_prefix
     delimeter = '|'
-    tar_file_size = 0
-    recv_buf = io.BytesIO()
     content_log = ''
     collected_files_no = 0
-    manifest_name = contents_log_dir + '/' + tar_name + '-contents.csv'
-    manifest_key = contents_log_bucket + '/' + tar_name + '-contents.csv'
-    #manifest_name = tar_name + '-contents.csv'
-    success_log.info('%s is archiving',tar_name)
-    #create_manifest(tar_name, org_files_list, manifest_name)
+    success_log.info('%s is combining based on %s',tar_name, combine)
+    delimeter = '|'
+    tarfile_full_name = contents_dir + "/" + tar_name
+    if protocol == 'fs':
+        bucket_prefix = fs_dir
     with open(manifest_name, 'a') as manifest_log:
         with tarfile.open(fileobj=recv_buf, mode='w:') as tar:
             for file_name, obj_name, file_size in org_files_list:
-                #print('tar_name: ', tar_name, 'file_name: ', file_name ,'tar pos:', recv_buf.tell(), 'filesize: ', file_size)
                 try:
                     # adding manifest info
                     tar_cur_pos = recv_buf.tell()
@@ -234,6 +219,18 @@ def copy_to_s3(tar_name, org_files_list):
                     error_log.info("%s is ignored" % file_name)
                     error_log.info(e)
                 manifest_log.write(content_log)
+        if protocol == 'fs':
+            with open(tarfile_full_name, 'wb') as outfile:
+                outfile.write(recv_buf.getbuffer())
+    return collected_files_no
+
+## upload to S3
+def copy_to_s3(tar_name, org_files_list):
+    recv_buf = io.BytesIO()
+    manifest_name = contents_log_dir + '/' + tar_name + '-contents.csv'
+    manifest_key = contents_log_bucket + '/' + tar_name + '-contents.csv'
+    success_log.info('%s is archiving',tar_name)
+    collected_files_no = create_manifest_and_tarfile(tar_name, org_files_list, manifest_name, recv_buf)
     recv_buf.seek(0)
     success_log.info('%s uploading',tar_name)
     # uploading to S3
@@ -244,7 +241,6 @@ def copy_to_s3(tar_name, org_files_list):
     meta_out = s3_client.head_object(Bucket=bucket_name, Key=tar_full_name)
     success_log.info('meta info: %s ',str(meta_out))
     success_log.info('%s is uploaded successfully\n' % tar_full_name)
-
     #print('metadata info: %s\n' % str(meta_out))
     #print('%s is uploaded successfully\n' % tar_name)
     return collected_files_no
@@ -252,46 +248,10 @@ def copy_to_s3(tar_name, org_files_list):
 
 ## save to file system
 def archive_to_fs(tar_name, org_files_list):
-    tar_file_size = 0
     recv_buf = io.BytesIO()
-    delimeter = '|'
-    content_log = ''
-    collected_files_no = 0
     success_log.info('%s is combining based on %s',tar_name, combine)
     manifest_name = contents_log_dir + '/' + tar_name + '-contents.csv'
-    #print(manifest_name)
-    # create manifest
-    #create_manifest(tar_name, org_files_list, manifest_name)
-    # tar archiving
-    tarfile_full_name = contents_dir + "/" + tar_name
-    with open(manifest_name, 'a') as manifest_log:
-        ## when using TARFILE module
-        with tarfile.open(fileobj=recv_buf, mode='w:') as tar:
-        #with tarfile.open(name=tarfile_full_name, mode='w:') as tar:
-            for file_name, obj_name, file_size in org_files_list:
-                try:
-                    # adding manifest info
-                    tar_cur_pos = recv_buf.tell()
-                    md5 = md5hash(file_name)
-                    content_log = tar_name + delimeter \
-                                + file_name + delimeter \
-                                + year + delimeter \
-                                + month + delimeter \
-                                + day + delimeter \
-                                + str(file_size) + delimeter \
-                                + str(tar_cur_pos) + delimeter \
-                    # perform TAR operation
-                    tar.add(file_name, arcname=obj_name)
-                    collected_files_no += 1
-                    # adding manifest info
-                    tar_end_pos = recv_buf.tell() - 1
-                    content_log = content_log + str(tar_end_pos) + delimeter + md5 +'\n'
-                except Exception as e:
-                    error_log.info("%s is ignored" % file_name)
-                    error_log.info(e)
-                manifest_log.write(content_log)
-        with open(tarfile_full_name, 'wb') as outfile:
-            outfile.write(recv_buf.getbuffer())
+    collected_files_no = create_manifest_and_tarfile(tar_name, org_files_list, manifest_name, recv_buf)
     success_log.info('%s is archived successfully\n' % tar_name)
     return collected_files_no
 ## end of saving to filesystem
@@ -336,8 +296,57 @@ def conv_obj_name(file_name, prefix_root, sub_prefix):
         obj_name = prefix_root + file_name.replace(sub_prefix,'',1)
     return obj_name
 
+# split by size_or_num and send to queue for input_file
+#
+#def split_filelist_send_queue(r, files, sub_prefix, q):
+#    num_obj=0
+#    sum_size = 0
+#    sum_files = 1
+#    if combine == 'size':
+#        size_or_num = sum_size
+#        maxNo = max_tarfile_size
+#    elif combine == 'count':
+#        size_or_num = sum_files
+#        maxNo = max_file_number
+#    else:
+#        print("combine is not proper, exiting")
+#        exit()
+#    org_files_list = []
+#    #end of definition
+#    for file in files:
+#        try:
+#            #support compatibility of MAC and windows
+#            ##file_name = unicodedata.normalize('NFC', file_name)
+#            file_name = os.path.join(r,file)
+#            obj_name = conv_obj_name(file_name, prefix_root, sub_prefix)
+#            if combine == 'size':
+#                f_size = os.stat(file_name).st_size
+#                size_or_num = size_or_num + f_size
+#            else:
+#                f_size = os.stat(file_name).st_size
+#                size_or_num += 1
+#            file_info = (file_name, obj_name, f_size)
+#            org_files_list.append(file_info)
+#            if maxNo < size_or_num:
+#                size_or_num = 1
+#                mp_data = org_files_list
+#                org_files_list = []
+#                try:
+#                    # put files into queue in max_tarfile_size
+#                    q.put(mp_data)
+#                    success_log.debug('0, sending mp_data size: %s'% len(mp_data))
+#                    success_log.debug('0, sending mp_data: %s'% mp_data)
+#                except Exception as e:
+#                    error_log.info('exception error: putting %s into queue is failed' % file_name)
+#                    error_log.info(e)
+#            num_obj+=1
+#        except Exception as e:
+#            error_log.info('exception error: getting %s file info is failed' % file_name)
+#            error_log.info(e)
+
 # get files to upload
 def get_files(sub_prefix, q):
+   # get all files from given directory
     num_obj=0
     sum_size = 0
     sum_files = 1
@@ -403,6 +412,7 @@ def get_files(sub_prefix, q):
         error_log.info('exception error: putting %s into queue is failed' % file_name)
         error_log.info(e)
     return num_obj
+
 
 def upload_file(q):
     global bucket_prefix
