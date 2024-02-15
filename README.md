@@ -180,6 +180,12 @@ You can select 3 options.
 2. using AWS DataSync
 3. using StorageGateway while mounting --fs_dir directory via nfs 
 
+Another way to transfer data into S3 is to use [mountpoint-s3](https://github.com/awslabs/mountpoint-s3). Using with "--protocol fs" parameter, user can mount S3 in posix style and archive data in S3 easily.
+
+``` bash
+$ mount-s3 --prefix mount/ your-own-dest-repo /mnt/s3
+```
+
 ## Finding tarfiles in Amazon S3
 Sometimes, we have to download some files from Amazon S3 to validate the product status. In this case, first we have to find tarfile which having specific subset files. Using AWS Athena we can find tarfile by condition, such as filename, date, duration using manifest file.
 
