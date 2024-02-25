@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 '''
 ChangeLogs
+- 2024.02.22:
+    - supporting input file as source
 - 2023.09.27:
     - supporting input_file (not completed)
 - 2023.09.27:
@@ -38,7 +40,7 @@ from boto3.s3.transfer import TransferConfig
 ## treating arguments
 ### common parameters
 parser = argparse.ArgumentParser()
-parser.add_argument('--src_dir', help='source directory e) /data/dir1/', action='store', required=True)
+parser.add_argument('--src_dir', help='source directory e) /data/dir1/ , you can select src_dir or input_file argument', action='store', required=False)
 parser.add_argument('--protocol', help='specify the protocol to use, s3 or fs ', action='store', default='s3', required=True)
 parser.add_argument('--prefix_root', help='prefix root e) dir1/', action='store', default='')
 parser.add_argument('--max_process', help='NUM e) 5', action='store', default=5, type=int)
@@ -50,7 +52,7 @@ parser.add_argument('--bucket_name', help='your bucket name e) your-bucket', act
 parser.add_argument('--endpoint', help='snowball endpoint e) http://10.10.10.10:8080 or https://s3.ap-northeast-2.amazonaws.com', action='store', default='https://s3.ap-northeast-2.amazonaws.com', required=False)
 parser.add_argument('--profile_name', help='aws_profile_name e) sbe1', action='store', default='default')
 parser.add_argument('--storage_class', help='specify S3 classes, be cautious Snowball support only STANDARD class; StorageClass=STANDARD|REDUCED_REDUNDANCY|STANDARD_IA|ONEZONE_IA|INTELLIGENT_TIERING|GLACIER|DEEP_ARCHIVE|OUTPOSTS|GLACIER_IR', action='store', default='STANDARD')
-parser.add_argument('--bucket_prefix', help='prefix of object in the bucket', action='store', default='')
+parser.add_argument('--bucket_prefix', help='prefix of tarfile in the bucket', action='store', default='')
 ### for fs protocol
 parser.add_argument('--fs_dir', help='specify fs mounting point when protocol is fs ', action='store', default='/mnt/fs')
 ### for input_file
@@ -59,9 +61,10 @@ parser.add_argument('--input_file', help='specify input_file instead of scanning
 args = parser.parse_args()
 
 ## set to variable
-prefix_list = args.src_dir  ## Don't forget to add last slash '/'
+src_dir = args.src_dir  ## Don't forget to add last slash '/'
+prefix_root = src_dir ## Don't forget to add last slash '/'
 #prefix_root = args.prefix_root ## Don't forget to add last slash '/'
-prefix_root = prefix_list ## Don't forget to add last slash '/'
+#prefix_root = prefix_list ## Don't forget to add last slash '/'
 ##Common Variables
 # max_process variable is to set concurrent processes count 
 max_process = args.max_process
@@ -83,6 +86,9 @@ transfer_config = TransferConfig(max_concurrency=mpu_max_concurrency, multipart_
 
 protocol = args.protocol
 bucket_name = args.bucket_name
+collected_files_no = 0
+
+# start of functions
 def bucket_path_parsing(prefix_path):
 # remove '/' at begining and end of bucket_path
     if prefix_path:
@@ -187,9 +193,9 @@ if protocol == 'fs':
 ## create manifest file and tarfile
 def create_manifest_and_tarfile(tar_name, org_files_list, manifest_name, recv_buf):
     global bucket_prefix
+    global collected_files_no
     delimeter = '|'
     content_log = ''
-    collected_files_no = 0
     success_log.info('%s is combining based on %s',tar_name, combine)
     delimeter = '|'
     tarfile_full_name = contents_dir + "/" + tar_name
@@ -282,138 +288,109 @@ def finishq(q, p_list):
         pi.join()
 
 def conv_obj_name(file_name, prefix_root, sub_prefix):
-    if len(prefix_root) == 0 :
+    if prefix_root is None:
+       prefix_root = '' 
+    elif len(prefix_root) == 0 :
         pass
     elif prefix_root[-1] != '/':
         prefix_root = prefix_root + '/'
     else:
         prefix_root = prefix_root
-    if sub_prefix[-1] != '/':
+
+    if len(sub_prefix) == 0:
+        pass
+    elif sub_prefix[-1] != '/':
         sub_prefix = sub_prefix + '/'
+    else:
+        pass
+
     if os.name == 'nt':
         obj_name = prefix_root + file_name.replace(sub_prefix,'',1).replace('\\', '/')
     else:
         obj_name = prefix_root + file_name.replace(sub_prefix,'',1)
     return obj_name
 
-# split by size_or_num and send to queue for input_file
-#
-#def split_filelist_send_queue(r, files, sub_prefix, q):
-#    num_obj=0
-#    sum_size = 0
-#    sum_files = 1
-#    if combine == 'size':
-#        size_or_num = sum_size
-#        maxNo = max_tarfile_size
-#    elif combine == 'count':
-#        size_or_num = sum_files
-#        maxNo = max_file_number
-#    else:
-#        print("combine is not proper, exiting")
-#        exit()
-#    org_files_list = []
-#    #end of definition
-#    for file in files:
-#        try:
-#            #support compatibility of MAC and windows
-#            ##file_name = unicodedata.normalize('NFC', file_name)
-#            file_name = os.path.join(r,file)
-#            obj_name = conv_obj_name(file_name, prefix_root, sub_prefix)
-#            if combine == 'size':
-#                f_size = os.stat(file_name).st_size
-#                size_or_num = size_or_num + f_size
-#            else:
-#                f_size = os.stat(file_name).st_size
-#                size_or_num += 1
-#            file_info = (file_name, obj_name, f_size)
-#            org_files_list.append(file_info)
-#            if maxNo < size_or_num:
-#                size_or_num = 1
-#                mp_data = org_files_list
-#                org_files_list = []
-#                try:
-#                    # put files into queue in max_tarfile_size
-#                    q.put(mp_data)
-#                    success_log.debug('0, sending mp_data size: %s'% len(mp_data))
-#                    success_log.debug('0, sending mp_data: %s'% mp_data)
-#                except Exception as e:
-#                    error_log.info('exception error: putting %s into queue is failed' % file_name)
-#                    error_log.info(e)
-#            num_obj+=1
-#        except Exception as e:
-#            error_log.info('exception error: getting %s file info is failed' % file_name)
-#            error_log.info(e)
+## get files to upload
+def process_file(sub_prefix, file_path, combine, size_or_num, maxNo, q, org_files_list, num_obj):
+    try:
+        obj_name = conv_obj_name(file_path, prefix_root, sub_prefix)
+        f_size = os.stat(file_path).st_size
 
-# get files to upload
-def get_files(sub_prefix, q):
-   # get all files from given directory
-    num_obj=0
-    sum_size = 0
-    sum_files = 1
+        if combine == 'size':
+            size_or_num += f_size
+        else:
+            size_or_num += 1
+
+        file_info = (file_path, obj_name, f_size)
+        org_files_list.append(file_info)
+
+        if maxNo < size_or_num:
+            size_or_num = 1
+            mp_data = org_files_list
+            org_files_list = []
+
+            try:
+                q.put(mp_data)
+                success_log.debug('0, sending mp_data size: %s' % len(mp_data))
+                success_log.debug('0, sending mp_data: %s' % mp_data)
+            except Exception as e:
+                log_exception(file_path, e)
+
+        num_obj += 1
+    except Exception as e:
+        log_exception(file_path, e)
+    return (size_or_num, num_obj, org_files_list)
+
+def process_files_in_directory(sub_prefix, combine, size_or_num, maxNo, q, num_obj):
+    org_files_list = []
+    for root, dirs, files in os.walk(sub_prefix):
+        for file in files:
+            file_path = os.path.join(root, file)
+            size_or_num, num_obj, org_files_list = process_file(sub_prefix, file_path, combine, size_or_num, maxNo, q, org_files_list, num_obj)
+    return (num_obj, org_files_list)
+
+def ingest_files_from_input_file(input_file, sub_prefix, combine, size_or_num, maxNo, q, num_obj):
+    sub_prefix = ''
+    org_files_list = []
+    with open(input_file, 'r') as file:
+        for line in file:
+            file_path = line.strip()
+            size_or_num, num_obj, org_files_list = process_file(sub_prefix, file_path, combine, size_or_num, maxNo, q, org_files_list, num_obj)
+    return (num_obj, org_files_list)
+
+def get_files(sub_prefix, combine, q, input_file=None):
+    num_obj = 0
+    size_or_num = 0
+    maxNo = 0
+
     if combine == 'size':
-        size_or_num = sum_size
         maxNo = max_tarfile_size
     elif combine == 'count':
-        size_or_num = sum_files
         maxNo = max_file_number
     else:
         print("combine is not proper, exiting")
         exit()
-    org_files_list = []
-   # get all files from given directory
-    for r,d,f in os.walk(sub_prefix):
-        for file in f:
-            try:
-                file_name = os.path.join(r,file)
-                # support compatibility of MAC and windows
-                #file_name = unicodedata.normalize('NFC', file_name)
-                obj_name = conv_obj_name(file_name, prefix_root, sub_prefix)
-                if combine == 'size':
-                    f_size = os.stat(file_name).st_size
-                    size_or_num = size_or_num + f_size
-                else:
-                    f_size = os.stat(file_name).st_size
-                    size_or_num += 1
-                """ commented 2023.04.26
-                if combine == 'size':
-                    f_size = os.stat(file_name).st_size
-                    size_or_num = size_or_num + f_size
-                else:
-                    size_or_num += 1
-                """
-                file_info = (file_name, obj_name, f_size)
-                #file_info = (file_name, obj_name)
-                org_files_list.append(file_info)
-                #if max_tarfile_size < sum_size:
-                if maxNo < size_or_num:
-                    size_or_num = 1
-                    mp_data = org_files_list
-                    org_files_list = []
-                    try:
-                        # put files into queue in max_tarfile_size
-                        q.put(mp_data)
-                        success_log.debug('0, sending mp_data size: %s'% len(mp_data))
-                        success_log.debug('0, sending mp_data: %s'% mp_data)
-                    except Exception as e:
-                        error_log.info('exception error: putting %s into queue is failed' % file_name)
-                        error_log.info(e)
-                num_obj+=1
-            except Exception as e:
-                error_log.info('exception error: getting %s file info is failed' % file_name)
-                error_log.info(e)
-            #time.sleep(0.1)
+
+    if input_file:
+        success_log.debug('input file name: %s' % input_file)
+        total_num_obj, org_files_list = ingest_files_from_input_file(input_file, sub_prefix, combine, size_or_num, maxNo, q, num_obj)
+    else:
+        total_num_obj, org_files_list = process_files_in_directory(sub_prefix, combine, size_or_num, maxNo, q, num_obj)
+
     try:
-        # put remained files into queue
         mp_data = org_files_list
         q.put(mp_data)
-        success_log.debug('1, sending mp_data size: %s'% len(mp_data))
-        success_log.debug('1, sending mp_data: %s'% mp_data)
+        success_log.debug('1, sending mp_data size: %s' % len(mp_data))
+        success_log.debug('1, sending mp_data: %s' % mp_data)
     except Exception as e:
-        error_log.info('exception error: putting %s into queue is failed' % file_name)
-        error_log.info(e)
-    return num_obj
+        log_exception(file_path, e)
+    return total_num_obj
 
+def log_exception(file_path, exception):
+    error_log.info(f'exception error: processing {file_path} failed')
+    error_log.info(exception)
 
+## upload file 
 def upload_file(q):
     global bucket_prefix
     if bucket_prefix:
@@ -428,6 +405,8 @@ def upload_file(q):
         success_log.debug('receving mp_data: %s'% org_files_list)
         if mp_data == quit_flag:
             break
+        # debug
+        #if org_files_list:
         try:
             if protocol == 's3':
                 copy_to_s3(tar_name, org_files_list)
@@ -440,13 +419,15 @@ def upload_file(q):
             error_log.info('exception error: %s uploading failed' % tar_name)
             error_log.info(e)
             traceback.print_exc()
+        # end of debug
         #return 0 ## for the dubug, it will pause with error
 
-def upload_file_multi(src_dir):
+def upload_file_multi(src_dir, q):
     success_log.info('%s directory will be transferred' % src_dir)
     p_list = run_multip(max_process, upload_file, q)
     # get object list and ingest to processes
-    num_obj = get_files(src_dir, q)
+    num_obj = get_files(src_dir, combine, q, input_file)
+
     # sending quit_flag and join processes
     finishq(q, p_list)
     success_log.info('%s directory is archived' % src_dir)
@@ -462,16 +443,6 @@ def upload_log():
         for file in log_files:
             if os.path.isdir(contents_log_dir):
                 key_name = file
-                #s3_client.upload_file(file, bucket_name, key_name)
-#        for r,d,f in os.walk(contents_log_dir):
-#            for file in f:
-#                try:
-#                    file_name = os.path.join(r,file)
-#                    key_name = str(log_dir +'/'+file)
-#                    s3_client.upload_file(file_name, bucket_name, key_name)
-#                except Exception as e:
-#                    error_log.info('exception error: uploading log failed')
-#                    error_log.info(e)
     elif protocol == 'fs':
         log_files = [errorlog_file, successlog_file]
         for file in log_files:
@@ -495,24 +466,23 @@ def result_log(start_time, total_files, contents_dir):
         error_log.info('dest_location is not defined')
         
     success_log.info('====================================')
-    success_log.info('Combine: %s' % combine)
-    success_log.info('size(bytes) or count: %s' % size_or_num)
+    success_log.info('Combine: {}'.format(combine))
+    #success_log.info('size(bytes) or count: %d' % size_or_num)
+    success_log.info('size(bytes) or count: {:,}'.format(size_or_num))
     success_log.info('Duration: {}'.format(end_time - start_time))
-    success_log.info('Scanned file numbers: %d' % total_files) 
-    success_log.info('TAR files location: %s' % dest_location)
+    success_log.info('Scanned file numbers: {:,}'.format(total_files))
+    success_log.info('TAR files location: {}'.format(dest_location))
     success_log.info('END')
     success_log.info('====================================')
 
 # start main function
 if __name__ == '__main__':
     # define simple queue
-    #q = multiprocessing.Queue()
     q = multiprocessing.Manager().Queue()
     start_time = datetime.now()
     success_log.info("starting script..."+str(start_time))
-    src_dir = prefix_list
-    check_srcdir(src_dir)
 
-    total_files = upload_file_multi(src_dir)
+    total_files = upload_file_multi(src_dir,q)
     result_log(start_time, total_files, contents_dir)
+    print("debug4: collect: %d" % collected_files_no )
     #upload_log()
