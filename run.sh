@@ -3,7 +3,10 @@ cmd="s3archiver.py"
 #
 # running s3 by size
 ## without bucket_prefix
-python3 $cmd --protocol s3 --src_dir '/data/nfsshare/fs1' --combine size --max_tarfile_size $((1*(1024**3))) --max_process 10 --bucket_name 'your-own-dest-repo'
+#python3 $cmd --protocol s3 --src_dir '/data/nfsshare/fs1' --combine size --max_tarfile_size $((1*(1024**3))) --max_process 10 --bucket_name 'your-own-dest-repo'
+
+## using --input_file
+python3 $cmd --protocol s3 --input_file 'input.txt' --combine size --max_tarfile_size $((1*(1024**3))) --max_process 10 --bucket_name 'your-own-dest-repo'
 
 ## with bucket_prefix
 #python3 $cmd --protocol s3 --src_dir '/data/nfsshare/fs1' --combine size --max_tarfile_size $((500*(1024**2))) --max_process 10 --bucket_name 'your-own-dest-repo' --bucket_prefix '/day1'

@@ -9,6 +9,7 @@ This feature will help user reduce cloud storage cost reducing PUT request cost,
 - Providing manifest files which is including tarfile, subset file, date, file size, first block, last block
 - Finding tarfiles which includes specific subset file by condition, such as filename, date, duration
 - Retrieving subset file itself from a tarfile in S3 using [byte-range](https://docs.aws.amazon.com/whitepapers/latest/s3-optimizing-performance-best-practices/use-byte-range-fetches.html)
+- Generating tarfiles from input file, instead of scanning filesystem(2024.02.25) 
 
 ## Pre-requsites
 - python >= 3.7
@@ -39,6 +40,7 @@ usage: s3archiver.py [-h] --src_dir SRC_DIR --protocol PROTOCOL
 optional arguments:
   -h, --help            show this help message and exit
   --src_dir SRC_DIR     source directory e) /data/dir1/
+  --input_file          instead of **--src_dir**, user can specify **--input_file** to ingest files
   --protocol PROTOCOL   specify the protocol to use, s3 or fs
   --prefix_root PREFIX_ROOT
                         prefix root e) dir1/
@@ -87,6 +89,20 @@ python3 s3archiver.py --protocol s3 --src_dir '/data/nfsshare/fs1' --combine siz
 - --max_tarfile_size: It means tarfile size. $((10*1024**3)) means 10*(1024*1024*1024)=10GB
 - --bucket_name: s3 bucket name
 - --bucket_prefix: target prefix in S3 bucket
+
+### Using **--input_file** instead of **--src_dir**
+If **--inpu_file** parameter is used, this program will generate tarfiles with files on input_file instead of scanning filesystem. This feature will be useful for treating error files.
+#### example of input_file format
+```bash
+find /data -type f > input.txt
+
+cat input.txt
+/data/dir0/file1.txt
+/data/dir0/file2.txt
+/data/dir0/file3.txt
+/data/dir0/file4.txt
+/data/dir0/file5.txt
+```
 
 ### Generating tarfiles and saving to filesystem directory
 You can run [s3archiver.py](https://github.com/aws-samples/small-files-archiving-solution/blob/main/s3archiver.py) to save tarfiles in filesystem. In this case, you have to specify --fs_dir to indicate destination directory of filesystem.
