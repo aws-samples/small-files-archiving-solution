@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 '''
 ChangeLogs
+- 2024.04.18:
+    - removing prefix_root argument, and revising bucket_prefix variable
+    - input file supports only s3, not filesystem 
 - 2024.02.22:
     - supporting input file as source
 - 2023.09.27:
@@ -42,7 +45,6 @@ from boto3.s3.transfer import TransferConfig
 parser = argparse.ArgumentParser()
 parser.add_argument('--src_dir', help='source directory e) /data/dir1/ , you can select src_dir or input_file argument', action='store', required=False)
 parser.add_argument('--protocol', help='specify the protocol to use, s3 or fs ', action='store', default='s3', required=True)
-parser.add_argument('--prefix_root', help='prefix root e) dir1/', action='store', default='')
 parser.add_argument('--max_process', help='NUM e) 5', action='store', default=5, type=int)
 parser.add_argument('--combine', help='size | count, if you combind files based on tarfile size, select \'size\', or if you combine files based on file count, select \'count\'', action='store', default='count', required=True)
 parser.add_argument('--max_file_number', help='max files in one tarfile', action='store', default=1000, type=int)
@@ -63,8 +65,6 @@ args = parser.parse_args()
 ## set to variable
 src_dir = args.src_dir  ## Don't forget to add last slash '/'
 prefix_root = src_dir ## Don't forget to add last slash '/'
-#prefix_root = args.prefix_root ## Don't forget to add last slash '/'
-#prefix_root = prefix_list ## Don't forget to add last slash '/'
 ##Common Variables
 # max_process variable is to set concurrent processes count 
 max_process = args.max_process
@@ -111,7 +111,10 @@ today = datetime.today()
 year = str(today.year)
 month= str(today.month)
 day = str(today.day)
-fs_dir = args.fs_dir
+if bucket_prefix:
+    fs_dir = args.fs_dir + '/' + bucket_prefix
+else: 
+    fs_dir = args.fs_dir
 root_log_dir = 'logs'
 log_dir = 'lists'
 if protocol == 's3':
@@ -129,20 +132,11 @@ elif protocol == 'fs':
 ##### Optional variables
 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 #cmd='upload_sbe' ## supported_cmd: 'download|del_obj_version|restore_obj_version'
-# create log directory
-try:
-    os.makedirs(contents_log_dir)
-except: 
-    print('ignoring to create ', contents_log_dir)
-try:
-    os.makedirs(root_log_dir)
-except: 
-    pass
-
 errorlog_file = '%s/error-%s.log' % (root_log_dir, current_time)
 successlog_file = '%s/success-%s.log' % (root_log_dir, current_time)
 quit_flag = 'DONE'
 # End of Variables
+
 
 # S3 session
 #s3_client = boto3.client('s3')
@@ -199,8 +193,8 @@ def create_manifest_and_tarfile(tar_name, org_files_list, manifest_name, recv_bu
     success_log.info('%s is combining based on %s',tar_name, combine)
     delimeter = '|'
     tarfile_full_name = contents_dir + "/" + tar_name
-    if protocol == 'fs':
-        bucket_prefix = fs_dir
+    #if protocol == 'fs':
+    #    bucket_prefix = fs_dir
     with open(manifest_name, 'a') as manifest_log:
         with tarfile.open(fileobj=recv_buf, mode='w:') as tar:
             for file_name, obj_name, file_size in org_files_list:
@@ -405,8 +399,6 @@ def upload_file(q):
         success_log.debug('receving mp_data: %s'% org_files_list)
         if mp_data == quit_flag:
             break
-        # debug
-        #if org_files_list:
         try:
             if protocol == 's3':
                 copy_to_s3(tar_name, org_files_list)
@@ -419,8 +411,6 @@ def upload_file(q):
             error_log.info('exception error: %s uploading failed' % tar_name)
             error_log.info(e)
             traceback.print_exc()
-        # end of debug
-        #return 0 ## for the dubug, it will pause with error
 
 def upload_file_multi(src_dir, q):
     success_log.info('%s directory will be transferred' % src_dir)
@@ -475,14 +465,45 @@ def result_log(start_time, total_files, contents_dir):
     success_log.info('END')
     success_log.info('====================================')
 
+def make_dir_structure():
+    if protocol == 's3':
+        try:
+            os.makedirs(root_log_dir)
+            success_log.info('%s is created', root_log_dir)
+        except Exception as e:
+            pass
+        try:
+            os.makedirs(contents_log_dir)
+            success_log.info('%s is created', contents_log_dir)
+        except Exception as e:
+            pass
+    elif protocol == 'fs':
+        try:
+            os.makedirs(root_log_dir)
+            success_log.info('%s is created', root_log_dir)
+        except Exception as e:
+            pass
+        try:
+            os.makedirs(contents_dir)
+            success_log.info('%s is created', contents_dir)
+        except Exception as e:
+            pass
+        try:
+            os.makedirs(contents_log_dir)
+            success_log.info('%s is created', contents_log_dir)
+        except Exception as e:
+            pass
+    else:
+        print("Error: no protocol specified")
+
 # start main function
 if __name__ == '__main__':
+    # create directory structure for filesystem
+    make_dir_structure()
     # define simple queue
     q = multiprocessing.Manager().Queue()
     start_time = datetime.now()
     success_log.info("starting script..."+str(start_time))
-
     total_files = upload_file_multi(src_dir,q)
     result_log(start_time, total_files, contents_dir)
-    print("debug4: collect: %d" % collected_files_no )
     #upload_log()
