@@ -52,8 +52,7 @@ optional arguments:
   --max_file_number MAX_FILE_NUMBER
                         max files in one tarfile
   --max_tarfile_size MAX_TARFILE_SIZE
-                        NUM bytes e) $((1*(1024**3))) #1GB for < total 50GB,
-                        10GB for >total 50GB
+                        NUM bytes e) $((1*(1024**3))) # == (1*(1024*1024*1024)bytes == 1GB.
   --bucket_name BUCKET_NAME
                         your bucket name e) your-bucket
   --endpoint ENDPOINT   snowball endpoint e) http://10.10.10.10:8080 or
@@ -209,7 +208,7 @@ Sometimes, we have to download some files from Amazon S3 to validate the product
 In order to search an object in manifest file, the first job is to create an external table with Athena query. It will create table schema based on contents of manifest files. Below is the sample query to create external table.
 
 ```bash
- CREATE EXTERNAL TABLE IF NOT EXISTS image_archiving ( tarname string, filename string, month int, day int, size int, start_byte int, stop_byte int, md5 string) ROW FORMAT DELIMITED FIELDS TERMINATED BY '|' ESCAPED BY '\\' LINES TERMINATED BY '\n' LOCATION 's3://your-own-dest-repo/lists/'
+ CREATE EXTERNAL TABLE IF NOT EXISTS image_archiving ( tarname string, filename string, year int, month int, day int, size int, start_byte int, stop_byte int, md5 string) ROW FORMAT DELIMITED FIELDS TERMINATED BY '|' ESCAPED BY '\\' LINES TERMINATED BY '\n' LOCATION 's3://your-own-dest-repo/lists/'
 ```
 
 ![athena-1](images/athena-1.png)
