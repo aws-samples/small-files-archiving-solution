@@ -35,7 +35,7 @@ usage: s3archiver.py [-h] --src_dir SRC_DIR --protocol PROTOCOL
                      [--bucket_name BUCKET_NAME] [--endpoint ENDPOINT]
                      [--profile_name PROFILE_NAME]
                      [--storage_class STORAGE_CLASS]
-                     [--bucket_prefix BUCKET_PREFIX] [--fs_dir FS_DIR]
+                     [--tar_prefix TAR_PREFIX] [--fs_dir FS_DIR]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -64,21 +64,23 @@ optional arguments:
                         STANDARD class; StorageClass=STANDARD|REDUCED_REDUNDAN
                         CY|STANDARD_IA|ONEZONE_IA|INTELLIGENT_TIERING|GLACIER|
                         DEEP_ARCHIVE|OUTPOSTS|GLACIER_IR
-  --bucket_prefix BUCKET_PREFIX
-                        prefix of object in the bucket
+  --tar_prefix BUCKET_PREFIX
+                        prefix of tar files in the bucket
+  --manifest_prefix BUCKET_PREFIX
+                        prefix of menifest files in the bucket
   --fs_dir FS_DIR       specify fs mounting point when protocol is fs
 ```
 
 ### Generating tarfiles and uploading to S3 directly
 You can run [s3archiver.py](https://github.com/aws-samples/small-files-archiving-solution/blob/main/s3archiver.py) to upload tarfiles into S3 directly. In this case, you can specify specify prefix optionally.
 ```bash
-## without bucket_prefix
+## without prefix
 python3 s3archiver.py --protocol s3 --src_dir '/data/nfsshare/fs1' --combine size --max_tarfile_size $((1*(1024**3))) --max_process 10 --bucket_name 'your-own-dest-repo'
 ```
 
 ```bash
-## with bucket_prefix
-python3 s3archiver.py --protocol s3 --src_dir '/data/nfsshare/fs1' --combine size --max_tarfile_size $((500*(1024**2))) --max_process 10 --bucket_name 'your-own-dest-repo' --bucket_prefix '/day1'
+## with prefix
+python3 s3archiver.py --protocol s3 --src_dir '/data/nfsshare/fs1' --combine size --max_tarfile_size $((500*(1024**2))) --max_process 10 --bucket_name 'your-own-dest-repo' --tar_prefix 'day1' --manifest_prefix 'day1'
 ```
 
 - --protocol s3: sending tarfile into S3 directly
@@ -87,7 +89,6 @@ python3 s3archiver.py --protocol s3 --src_dir '/data/nfsshare/fs1' --combine siz
 - --max_process: number of concurrent job. default is 10. It means 10 process will create TAR files in parallel
 - --max_tarfile_size: It means tarfile size. $((10*1024**3)) means 10*(1024*1024*1024)=10GB
 - --bucket_name: s3 bucket name
-- --bucket_prefix: target prefix in S3 bucket
 
 ### Using **--input_file** instead of **--src_dir**
 If **--inpu_file** parameter is used, this program will generate tarfiles with files on input_file instead of scanning filesystem. This feature will be useful for treating error files.
@@ -159,7 +160,7 @@ END
 success.log and error.log will be stored in **logs** directory below command running directory.
 
 ### Providing manifest files 
-When uploading to S3 is finished, you can find manifest files in **lists** directory under **logs** directory and under **bucket_prefix**.
+When uploading to S3 is finished, you can find manifest files in **lists** directory under **logs** directory and under **tar_prefix**, and **manifest_prefix**.
 When saving to filesystem, newly generated tarfiles and manifest files will be stored in path which provided by **--fs_dir** argument. There would be **lists** directory in destination location. In there, manifest files are stored. Each TARfile will have its own manifest files. 
 
 ```bash
