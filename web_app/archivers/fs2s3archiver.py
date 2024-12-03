@@ -34,14 +34,15 @@ class FS2S3Archiver:
 
     def _get_s3_client(self):
         session = boto3.Session(profile_name=self.args.profile_name)
-        config = Config(
-            retries={
-                'max_attempts': 10,
-                'mode': 'adaptive'
-            },
-            max_pool_connections=50
-        )
-        return session.client('s3', config=config)
+        #config = Config(
+        #    retries={
+        #        'max_attempts': 10,
+        #        'mode': 'adaptive'
+        #    },
+        #    max_pool_connections=50
+        #)
+        #return session.client('s3', config=config)
+        return session.client('s3')
 
     def get_file_list(self):
         if self.args.input_file:
@@ -89,8 +90,8 @@ class FS2S3Archiver:
 
     def create_tar_and_upload(self, file_list):
         with self.tar_sequence_lock:
-            tar_name = f"archive_{self.current_time}_{self.tar_sequence:04d}.tar"
-            manifest_name = f"manifest_{self.current_time}_{self.tar_sequence:04d}.csv"
+            tar_name = f"archive_{self.current_time}_{self.tar_sequence:08d}.tar"
+            manifest_name = f"manifest_{self.current_time}_{self.tar_sequence:08d}.csv"
             self.tar_sequence += 1
 
         tar_buffer = io.BytesIO()

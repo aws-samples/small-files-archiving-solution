@@ -69,32 +69,42 @@ class FS2FSArchiver:
 
     def create_tar_and_save(self, file_list):
         with self.tar_sequence_lock:
-            tar_name = f"archive_{self.current_time}_{self.tar_sequence:04d}.tar"
-            manifest_name = f"manifest_{self.current_time}_{self.tar_sequence:04d}.csv"
+            tar_name = f"archive_{self.current_time}_{self.tar_sequence:08d}.tar"
+            manifest_name = f"manifest_{self.current_time}_{self.tar_sequence:08d}.csv"
             self.tar_sequence += 1
     
         tar_path = os.path.join(self.dst_prefix, 'archives', tar_name)
         manifest_path = os.path.join(self.dst_prefix, 'manifests', manifest_name)
+
+        tar_buffer = io.BytesIO()
+        manifest_content = io.StringIO()
         
         os.makedirs(os.path.dirname(tar_path), exist_ok=True)
         os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
     
-        with tarfile.open(tar_path, mode='w') as tar:
+        with tarfile.open(fileobj=tar_buffer, mode='w') as tar:
             for file_name, obj_name, file_size in file_list:
-                tar_cur_pos = tar.offset
+                tar_cur_pos = tar_buffer.tell()
                 tar.add(file_name, arcname=obj_name)
-                tar_end_pos = tar.offset - 1 
+                tar_end_pos = tar_buffer.tell() - 1 
                 md5 = self.md5hash(file_name)
                 content_log = f"{tar_name}{DELIMITER}{file_name}{DELIMITER}"
                 content_log += f"{datetime.now().strftime('%Y|%m|%d')}{DELIMITER}"
                 content_log += f"{file_size}{DELIMITER}{tar_cur_pos}{DELIMITER}"
                 content_log += f"{tar_end_pos}{DELIMITER}{md5}\n"
-                with open(manifest_path, 'a') as manifest_write:
-                    manifest_write.write(content_log)
+                manifest_content.write(content_log)
     
         self.total_files += len(file_list)
         self.total_tar_files += 1
         self.total_manifest_files += 1
+
+        # Save tarfile
+        with open(tar_path, 'wb') as f:
+            f.write(tar_buffer.getvalue())
+
+        # Save manifest file
+        with open(manifest_path, 'w') as f:
+            f.write(manifest_content.getvalue())
     
         return f"Created {tar_name} and {manifest_name}"
 
