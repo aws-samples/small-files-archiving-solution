@@ -60,7 +60,8 @@ After running a script, you will see url address to access, then open this url o
 
 ![archiving](images/v2/archiving-run.png)
 3. Enter the required parameters and click the "Run" button to start archiving.
-  - Numbers of Thread: his parameter specifies the number of threads to be used for the archiving process. More threads can speed up the process by performing multiple operations in parallel, but it also requires more system resources.
+  - Numbers of Thread: This parameter specifies the number of threads to be used for the archiving process. More threads can speed up the process by performing multiple operations in parallel, but it also requires more system resources.
+  - Storage Classes: This is the destination S3 Storage class where tar files are stored
   - Source Path: This is the path to the source directory or file system from which the files will be archived. It is used when the source type is a file system
   - Destination Bucket: This is the name of the S3 bucket where the archived files will be stored. It is required for both file system to S3 (fs_to_s3) and S3 to S3
   - Destination Prefix: This is the prefix (or folder path) within the destination S3 bucket where the archived files will be stored. It helps in organizing the files within the bucket.
