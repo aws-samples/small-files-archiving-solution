@@ -68,12 +68,71 @@ After running a script, you will see url address to access, then open this url o
 
 4. Confirm the result
 ![archiving](images/v2/archiving-result.png)
+  - navigate s3 console to destination bucket and prefix.
+  - confirm new directories for archived files and manifests files
+```bash
+ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/
+                           PRE archives/
+                           PRE manifests/
+```
+  - confirm tarfiles in __archives__ directory
+```bash
+ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/archives/ 
+2025-01-13 17:06:21   10895360 archive_20250113_080619_0001.tar
+2025-01-13 17:06:21   10885120 archive_20250113_080619_0002.tar
+2025-01-13 17:06:20   10905600 archive_20250113_080619_0003.tar
+2025-01-13 17:06:21   10895360 archive_20250113_080619_0004.tar
+2025-01-13 17:06:21   10895360 archive_20250113_080619_0005.tar
+2025-01-13 17:06:22   10905600 archive_20250113_080619_0006.tar
+2025-01-13 17:06:22   10885120 archive_20250113_080619_0007.tar
+2025-01-13 17:06:22   10915840 archive_20250113_080619_0008.tar
+2025-01-13 17:06:22   10885120 archive_20250113_080619_0009.tar
+2025-01-13 17:06:22   10885120 archive_20250113_080619_0010.tar
+2025-01-13 17:06:23   10946560 archive_20250113_080619_0011.tar
+2025-01-13 17:06:23   10905600 archive_20250113_080619_0012.tar
+2025-01-13 17:06:23   10926080 archive_20250113_080619_0013.tar
+2025-01-13 17:06:23   10885120 archive_20250113_080619_0014.tar
+2025-01-13 17:06:23   10874880 archive_20250113_080619_0015.tar
+2025-01-13 17:06:24   10915840 archive_20250113_080619_0016.tar
+2025-01-13 17:06:24   10905600 archive_20250113_080619_0017.tar
+2025-01-13 17:06:24   10895360 archive_20250113_080619_0018.tar
+2025-01-13 17:06:24   10895360 archive_20250113_080619_0019.tar
+2025-01-13 17:06:24    4935680 archive_20250113_080619_0020.tar
+```
+  - confirm tarfiles in __manifests__ directory
+```bash
+ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/manifests/ 
+2025-01-13 17:06:21      84191 manifest_20250113_080619_0001.csv
+2025-01-13 17:06:21      82740 manifest_20250113_080619_0002.csv
+2025-01-13 17:06:21      82755 manifest_20250113_080619_0003.csv
+2025-01-13 17:06:21      83878 manifest_20250113_080619_0004.csv
+2025-01-13 17:06:21      82590 manifest_20250113_080619_0005.csv
+2025-01-13 17:06:23      86792 manifest_20250113_080619_0006.csv
+2025-01-13 17:06:23      80970 manifest_20250113_080619_0007.csv
+2025-01-13 17:06:23      85648 manifest_20250113_080619_0008.csv
+2025-01-13 17:06:22      81118 manifest_20250113_080619_0009.csv
+2025-01-13 17:06:23      81145 manifest_20250113_080619_0010.csv
+2025-01-13 17:06:24      89525 manifest_20250113_080619_0011.csv
+2025-01-13 17:06:24      84372 manifest_20250113_080619_0012.csv
+2025-01-13 17:06:24      86457 manifest_20250113_080619_0013.csv
+2025-01-13 17:06:24      81787 manifest_20250113_080619_0014.csv
+2025-01-13 17:06:24      82103 manifest_20250113_080619_0015.csv
+2025-01-13 17:06:24      84048 manifest_20250113_080619_0016.csv
+2025-01-13 17:06:25      85186 manifest_20250113_080619_0017.csv
+2025-01-13 17:06:25      82892 manifest_20250113_080619_0018.csv
+2025-01-13 17:06:25      82963 manifest_20250113_080619_0019.csv
+2025-01-13 17:06:24      38798 manifest_20250113_080619_0020.csv
+
+```
 
 ### Searching
 1. Select "Search" from the sidebar.
 ![searching](images/v2/search-menu.png)
 2. Enter the S3 bucket name and prefix.
+  - bucket name: Destination bucket
+  - prefix: Prefix which contains manifest of destination bucket.
 3. Enter the search type and value, then click the "Search" button.
+__Search__ feature supports 2 types; by name, and by duration.
 ![searching](images/v2/search-run.png)
 4. Confirm query result
 ![searching](images/v2/search-result.png)
@@ -108,6 +167,7 @@ total 12
 ```
 
 ## Performance comparison
+*To be updated soon*
 
 ## Conclusion
 Small file archiving solution is built to provide efficient way of archiving small file on Amazon S3. Combing small files into big TAR file can help customer reduce PUT request cost and monitoring cost, and storing data in Amazon S3 Intelligent Tiering help customer save storage cost specially for long-term archiving data. With Amazon Athena, customer can search specific file when he needs to retrieve it.
