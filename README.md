@@ -8,9 +8,9 @@
 __small file archiving solution__ is aimed to transfer millions of files into Amazon S3 efficiently aggregating small files into big tarfiles. This application supports not only trasnferring but also searching original file and restore it individually. This feature will help user reduce cloud storage cost reducing PUT request cost, and transfer to cloud faster than transferring original files.
 
 ### Features
-- Aggregating files on on-premise storage, and generating tarfiles and uploading to S3 directly
+- Aggregating files on on-premises storage, and generating tarfiles and uploading to S3 directly
 - Providing manifest files which is including tarfile, subset file, date, file size, first block, last block, md5
-- Finding tarfiles which includes specific subset file by condition, such as filename, date, duration
+- Finding tarfiles which includes specific subset file by condition, such as filename, date range.
 - Retrieving subset file itself from a tarfile in S3 using [byte-range](https://docs.aws.amazon.com/whitepapers/latest/s3-optimizing-performance-best-practices/use-byte-range-fetches.html)
 - Generating tarfiles from input file, instead of scanning filesystem
 - GUI based operation, which is based on streamlit
@@ -69,13 +69,13 @@ After running a script, you will see url address to access, then open this url o
 4. Confirm the result
 ![archiving](images/v2/archiving-result.png)
   - navigate s3 console to destination bucket and prefix.
-  - confirm new directories for archived files and manifests files
+  - confirm new prefix for archived files and manifests files
 ```bash
 ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/
                            PRE archives/
                            PRE manifests/
 ```
-  - confirm tarfiles in __archives__ directory
+  - confirm tarfiles in __archives__ prefix
 ```bash
 ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/archives/ 
 2025-01-13 17:06:21   10895360 archive_20250113_080619_0001.tar
@@ -99,7 +99,7 @@ ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/archives/
 2025-01-13 17:06:24   10895360 archive_20250113_080619_0019.tar
 2025-01-13 17:06:24    4935680 archive_20250113_080619_0020.tar
 ```
-  - confirm tarfiles in __manifests__ directory
+  - confirm tarfiles in __manifests__ prefix
 ```bash
 ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/manifests/ 
 2025-01-13 17:06:21      84191 manifest_20250113_080619_0001.csv
@@ -170,7 +170,7 @@ total 12
 *To be updated soon*
 
 ## Conclusion
-Small file archiving solution is built to provide efficient way of archiving small file on Amazon S3. Combing small files into big TAR file can help customer reduce PUT request cost and monitoring cost, and storing data in Amazon S3 Intelligent Tiering help customer save storage cost specially for long-term archiving data. With Amazon Athena, customer can search specific file when he needs to retrieve it.
+Small file archiving solution is built to provide efficient way of archiving small file on Amazon S3. Combing small files into big TAR file can help customer reduce PUT request cost and monitoring cost, and storing data in Amazon S3 Intelligent Tiering help customer save storage cost specially for long-term archiving data. With this solution, customer can search and restore specific file when he needs to retrieve it.
 
 ## Security
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.

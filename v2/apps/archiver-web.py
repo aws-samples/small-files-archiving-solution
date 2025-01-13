@@ -44,6 +44,8 @@ elif st.session_state.page == 2:
 
     # Common parameters
     num_threads = st.number_input("Numbers of Thread", min_value=1, value=5)
+    storage_classes = ['STANDARD','STANDARD_IA','ONEZONE_IA','INTELLIGENT_TIERING','GLACIER','DEEP_ARCHIVE','GLACIER_IR','EXPRESS_ONEZONE']
+    tar_storageclass = st.selectbox('Select storage class for tar file:', storage_classes)
 
     # Function-specific parameters
     if function_name == "fs_to_s3":
@@ -54,26 +56,25 @@ elif st.session_state.page == 2:
 
         if batch == "size":
             max_size = st.text_input("Max Tarfile Size(MB,GB)", value="100MB")
-            command = f"python3 {program} --src-path {src_path} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-size {max_size}"
+            command = f"python3 {program} --src-path {src_path} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-size {max_size} --tar-storageclass {tar_storageclass}"
         else:
             max_files = st.number_input("Max files in a tarfile ", value=10000)
-            command = f"python3 {program} --src-path {src_path} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files}"
+            command = f"python3 {program} --src-path {src_path} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files} --tar-storageclass {tar_storageclass}"
         
     elif function_name == "s3_to_s3":
         src_bucket = st.text_input("Source Bucket")
         src_prefix = st.text_input("Source Prefix")
         dst_bucket = st.text_input("Destination Bucket")
         dst_prefix = st.text_input("Destination Prefix")
-        max_size = st.number_input("Max Tarfile Size", value=136870912)
-        program = "s3s3-archiver.py"
+        program = "apps/s3s3-archiver.py"
 
         if batch == "size":
             max_size = st.text_input("Max Tarfile Size(MB,GB)", value="100MB")
-            command = f"python3 {program} --src_bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-size {max_size}"
+            command = f"python3 {program} --src-bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-size {max_size} --tar-storageclass {tar_storageclass}"
         else:
             max_files = st.number_input("Max files in a tarfile ", value=10000)
-            command = f"python3 {program} --src_bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files}"
-        
+            command = f"python3 {program} --src-bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files} --tar-storageclass {tar_storageclass}"
+
     if st.button("Run"):
         with st.spinner("Running archiver..."):
             stdout, stderr = run_archiver(command)

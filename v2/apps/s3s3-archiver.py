@@ -90,6 +90,8 @@ class S3toS3Archiver:
         self.num_threads = args.num_threads
         self.compress = args.compress
         self.profile_name = args.profile_name
+        self.tar_storageclass = args.tar_storageclass
+        self.manifest_storageclass = args.manifest_storageclass
 
         # Configure S3 client with higher max pool connections
         config = Config(
@@ -335,10 +337,10 @@ class S3toS3Archiver:
 
             # Upload tar file and manifest
             if manifest_entries:
-                self._upload_archive_and_manifest(tar_buffer, manifest_entries, batch.batch_number, tar_key)
+                self._upload_archive_and_manifest(tar_buffer, manifest_entries, batch.batch_number, tar_key, tar_storageclass, manifest_storageclass)
                 self.logger.info(f"{tar_key}: uploaded")
 
-    def _upload_archive_and_manifest(self, tar_buffer, manifest_entries, batch_number, tar_key):
+    def _upload_archive_and_manifest(self, tar_buffer, manifest_entries, batch_number, tar_key, t_sc, m_sc):
         """Upload tar archive and manifest to destination S3"""
         try:
             manifest_key = f"{self.dst_prefix}/manifests/manifest_{self.current_time}_{batch_number}.csv"
@@ -349,6 +351,7 @@ class S3toS3Archiver:
                 tar_buffer,
                 self.dst_bucket,
                 tar_key,
+                ExtraArgs = { 'StorageClass': t_sc}, 
                 Config=self.transfer_config
             )
             self._update_stats(tars=1)
@@ -361,6 +364,7 @@ class S3toS3Archiver:
             self.s3_client.put_object(
                 Bucket=self.dst_bucket,
                 Key=manifest_key,
+                StorageClass=m_sc, 
                 Body=manifest_content.encode('utf-8')
             )
             self._update_stats(manifests=1)
@@ -488,6 +492,9 @@ def main():
     parser.add_argument('--num-threads', type=int, default=10, help='Number of worker threads')
     parser.add_argument('--compress', type=util.strtobool, default=False, help='GZip Compress for tarfile, True or False')
     parser.add_argument('--profile-name', help='AWS profile name to use')
+    parser.add_argument('--tar-storageclass', default='STANDARD', help='Storage Class for TAR file')
+    parser.add_argument('--manifest-storageclass', default='STANDARD', help='Storage Class for manifest file')
+    # StorageClass='STANDARD'|'REDUCED_REDUNDANCY'|'STANDARD_IA'|'ONEZONE_IA'|'INTELLIGENT_TIERING'|'GLACIER'|'DEEP_ARCHIVE'|'OUTPOSTS'|'GLACIER_IR'|'SNOW'|'EXPRESS_ONEZONE',
 
     args = parser.parse_args()
     

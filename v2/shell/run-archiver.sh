@@ -9,6 +9,7 @@ src_path="/data/nfsshare/fs1/d0001"
 dst_bucket_path="day20250113"
 dst_path="dest_fs/"
 input_file="input.txt"
+sc="STARNDARD_IA"
 
 # fs to s3 by size
 function fstos3_size () {
@@ -17,7 +18,8 @@ python3 $cmd \
     --dst-bucket $dst_bucket \
     --dst-prefix $dst_bucket_path \
     --num-threads 4 \
-    --max-size 10MB
+    --max-size 10MB \
+    --tar-storageclass $sc
 }
 
 # fs to s3 by count

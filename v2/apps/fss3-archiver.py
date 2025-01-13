@@ -97,6 +97,8 @@ class FS2S3Archiver:
         self.profile_name = args.profile_name
         self.input_file = args.input_file  # New parameter for input file
         self.current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.tar_storageclass = args.tar_storageclass
+        self.manifest_storageclass = args.manifest_storageclass
 
         # Set S3 client
         self.s3_client = self._get_s3_client()
@@ -563,9 +565,9 @@ class FS2S3Archiver:
 
                     # Upload files
                     tar_buffer.seek(0)
-                    self._upload_to_s3(bucket=self.dst_bucket, key=tar_path, data=tar_buffer)
+                    self._upload_to_s3(bucket=self.dst_bucket, key=tar_path, data=tar_buffer, storageclass=self.tar_storageclass)
                     manifest_buffer.seek(0)
-                    self._upload_to_s3(bucket=self.dst_bucket, key=manifest_path, data=manifest_buffer.getvalue().encode('utf-8'))
+                    self._upload_to_s3(bucket=self.dst_bucket, key=manifest_path, data=manifest_buffer.getvalue().encode('utf-8'), storageclass=self.manifest_storageclass)
 
                     # Update statistics
                     self._update_stats(
@@ -601,7 +603,7 @@ class FS2S3Archiver:
                 self.stop_event.set()
                 break
 
-    def _upload_to_s3(self, bucket, key, data):
+    def _upload_to_s3(self, bucket, key, data, storageclass):
         """Upload data to S3"""
         try:
             if isinstance(data, io.BytesIO):
@@ -609,39 +611,18 @@ class FS2S3Archiver:
                     data,
                     bucket,
                     key.lstrip('/'),
+                    ExtraArgs={"StorageClass": storageclass}, 
                     Config=self.transfer_config
                 )
             else:
                 self.s3_client.put_object(
                     Bucket=bucket,
                     Key=key.lstrip('/'),
-                    Body=data
+                    Body=data,
+                    StorageClass=storageclass
                 )
         except Exception as e:
             raise Exception(f"Failed to upload to S3: {str(e)}") 
-
-    def _upload_with_retry(self, file_obj, s3_key, max_retries=5):
-        """Upload to S3 with retry logic"""
-        for attempt in range(max_retries):
-            try:
-                file_obj.seek(0)
-                self.s3_client.upload_fileobj(
-                    file_obj,
-                    self.dst_bucket,
-                    s3_key,
-                    Config=self.transfer_config
-                )
-                return
-            except ClientError as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    self.logger.warning(f"Upload failed. Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    self.logger.error(f"Failed to upload {s3_key} after {max_retries} attempts")
-                    self.failed_files += 1
-                    raise
-
 
 def main():
     parser = argparse.ArgumentParser(description='File System to S3 Archiver')
@@ -655,6 +636,9 @@ def main():
                       help='Whether to compress the tar files')
     parser.add_argument('--profile-name', default='default', help='AWS profile name')
     parser.add_argument('--input-file', help='Path to a file containing list of files to process')
+    parser.add_argument('--tar-storageclass', default='STANDARD', help='Storage Class for TAR file')
+    parser.add_argument('--manifest-storageclass', default='STANDARD', help='Storage Class for manifest file')
+    # StorageClass='STANDARD'|'REDUCED_REDUNDANCY'|'STANDARD_IA'|'ONEZONE_IA'|'INTELLIGENT_TIERING'|'GLACIER'|'DEEP_ARCHIVE'|'OUTPOSTS'|'GLACIER_IR'|'SNOW'|'EXPRESS_ONEZONE',
     
     args = parser.parse_args()
     
