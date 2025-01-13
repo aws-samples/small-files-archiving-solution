@@ -1,6 +1,12 @@
 import streamlit as st
 import subprocess
 
+def next_page():
+    st.session_state.page += 1
+
+def prev_page():
+    st.session_state.page -= 1
+
 def run_archiver(command):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, text=True)
     stdout, stderr = process.communicate()
@@ -29,8 +35,8 @@ if st.session_state.page == 1:
     st.session_state.dst_type = st.selectbox("Select Destination Type", ['s3'], key='dst_type_select')
     st.session_state.batch = st.selectbox("Select batch strategy", ['size', 'count'], key='batch_select')
 
-    if st.button("Next"):
-        st.session_state.page = 2
+    if st.button("Next", on_click=next_page):
+        pass
 
 # Page 2: Parameter Input and Execution
 elif st.session_state.page == 2:
@@ -89,3 +95,5 @@ elif st.session_state.page == 2:
 
     st.warning("After press 'RUN', do not move to other page. Status will disapper")
 
+    if st.button("Back", on_click=prev_page):
+        pass

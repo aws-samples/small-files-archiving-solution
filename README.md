@@ -6,6 +6,7 @@
 
 ## What is __small file archiving solution__?
 __small file archiving solution__ is aimed to transfer millions of files into Amazon S3 efficiently aggregating small files into big tarfiles. This application supports not only trasnferring but also searching original file and restore it individually. This feature will help user reduce cloud storage cost reducing PUT request cost, and transfer to cloud faster than transferring original files.
+The codes of this solution are developed by me and __Amazon Q Developer__. 
 
 ### Features
 - Aggregating files on on-premises storage, and generating tarfiles and uploading to S3 directly
@@ -51,7 +52,7 @@ After running a script, you will see url address to access, then open this url o
 ### Archiving
 1. Select "Archiver" from the sidebar.
 ![archiving](images/v2/archiving-menu.png)
-2. Choose the source type and batch strategy, then click the "Next" button twice.
+2. Choose the source type and batch strategy, then click the "Next" button.
   - source type: supports __filesystem__ or __S3__
   - destination type: supports __S3__
   - batch stragegy:
