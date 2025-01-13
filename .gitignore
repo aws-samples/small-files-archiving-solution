@@ -1,2 +1,5 @@
 sandbox
 tmp
+__pycache__
+*old
+scripts
