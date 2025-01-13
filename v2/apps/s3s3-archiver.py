@@ -337,7 +337,7 @@ class S3toS3Archiver:
 
             # Upload tar file and manifest
             if manifest_entries:
-                self._upload_archive_and_manifest(tar_buffer, manifest_entries, batch.batch_number, tar_key, tar_storageclass, manifest_storageclass)
+                self._upload_archive_and_manifest(tar_buffer, manifest_entries, batch.batch_number, tar_key, self.tar_storageclass, self.manifest_storageclass)
                 self.logger.info(f"{tar_key}: uploaded")
 
     def _upload_archive_and_manifest(self, tar_buffer, manifest_entries, batch_number, tar_key, t_sc, m_sc):
