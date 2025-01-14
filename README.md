@@ -101,7 +101,7 @@ ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/archives/
 2025-01-13 17:06:24   10895360 archive_20250113_080619_0019.tar
 2025-01-13 17:06:24    4935680 archive_20250113_080619_0020.tar
 ```
-  - confirm tarfiles in __manifests__ prefix
+  - confirm manifest files in __manifests__ prefix
 ```bash
 ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/manifests/ 
 2025-01-13 17:06:21      84191 manifest_20250113_080619_0001.csv
