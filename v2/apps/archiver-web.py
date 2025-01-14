@@ -1,5 +1,31 @@
 import streamlit as st
 import subprocess
+import os
+
+def is_process_running(pid):
+    try:
+        return psutil.pid_exists(pid)
+    except:
+        return False
+
+def check_lock_file():
+    lock_file = "archiver.lock"
+    if os.path.exists(lock_file):
+        with open(lock_file, 'r') as f:
+            pid = int(f.read().strip())
+            if is_process_running(pid):
+                return True
+    return False
+
+def create_lock_file(pid):
+    lock_file = "archiver.lock"
+    with open(lock_file, 'w') as f:
+        f.write(str(pid))
+
+def remove_lock_file():
+    lock_file = "archiver.lock"
+    if os.path.exists(lock_file):
+        os.remove(lock_file)
 
 def next_page():
     st.session_state.page += 1
@@ -8,9 +34,23 @@ def prev_page():
     st.session_state.page -= 1
 
 def run_archiver(command):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, text=True)
-    stdout, stderr = process.communicate()
-    return stdout, stderr
+    try:
+        if check_lock_file():
+            return "", "Another archiver process is already running. Please wait."
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, text=True)
+
+        # Create lock file with current process ID
+        create_lock_file(process.pid)
+        # Explicitly set timeout=None to wait indefinitely
+        stdout, stderr = process.communicate(timeout=None)
+        # Remove lock file after completion
+        remove_lock_file()
+        return stdout, stderr
+    except subprocess.TimeoutExpired as e:
+        process.kill()
+        return "", f"Process timed out: {str(e)}"
+    except Exception as e:
+        return "", f"Error occurred: {str(e)}"
 
 st.title("File Archiver")
 
@@ -82,18 +122,35 @@ elif st.session_state.page == 2:
             command = f"python3 {program} --src-bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files} --tar-storageclass {tar_storageclass}"
 
     if st.button("Run"):
-        with st.spinner("Running archiver..."):
-            stdout, stderr = run_archiver(command)
-        
-        st.subheader("Execution Result")
-        #if stdout:
-        #    st.subheader("Job report")
-        #    st.text_area("Output", stdout, height=200)
-        if stderr:
-            st.subheader("Job report")
-            st.text_area("Output", stderr, height=200)
+        if check_lock_file():
+            st.error("Another archiver process is already running. Please wait.")
+        else: 
+            # Store the execution state in session
+            if 'is_running' not in st.session_state:
+                st.session_state.is_running = True
+                st.session_state.execution_completed = False
 
-    st.warning("After press 'RUN', do not move to other page. Status will disapper")
+            if st.session_state.is_running:
+                with st.spinner("Running archiver..."):
+                    stdout, stderr = run_archiver(command)
+                    # Store results in session state
+                    st.session_state.stdout = stdout
+                    st.session_state.stderr = stderr
+                    st.session_state.is_running = False
+                    st.session_state.execution_completed = True
 
-    if st.button("Back", on_click=prev_page):
-        pass
+            # Display results
+            if st.session_state.execution_completed:
+                st.subheader("Execution Result")
+                if st.session_state.stderr:
+                    st.subheader("Job report")
+                    st.text_area("Output", st.session_state.stderr, height=200)
+
+    # Add this to prevent accidental navigation while process is running
+    if 'is_running' in st.session_state and st.session_state.is_running:
+        st.warning("Process is running. Please wait until it completes.")
+        # Disable the Back button while running
+        st.button("Back", disabled=True)
+    else:
+        if st.button("Back", on_click=prev_page):
+            pass

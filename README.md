@@ -127,6 +127,9 @@ ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/manifests/
 
 ```
 
+#### Logs
+Whenever archiving program runs, it generate logfile under __logs__ /__{dst_prefix}__ directory. With this logs, you can find out errors, result messages.
+
 ### Searching
 1. Select "Search" from the sidebar.
 ![searching](images/v2/search-menu.png)

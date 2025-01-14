@@ -89,6 +89,7 @@ class S3toS3Archiver:
         self.max_size_per_tar = args.max_size
         self.num_threads = args.num_threads
         self.compress = args.compress
+        self.current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.profile_name = args.profile_name
         self.tar_storageclass = args.tar_storageclass
         self.manifest_storageclass = args.manifest_storageclass
@@ -107,13 +108,24 @@ class S3toS3Archiver:
         
         self.transfer_config = TransferConfig(
             max_concurrency=256,
-            multipart_chunksize=64 * 1024 * 1024,  # 64MB chunks
-            multipart_threshold=64 * 1024 * 1024  # Start multipart at 64MB
+            multipart_chunksize=16 * 1024 * 1024,  # 64MB chunks
+            multipart_threshold=16 * 1024 * 1024  # Start multipart at 64MB
         )
+
+        # Create necessary directories
+        self.directories = self._create_directories()
         
         # Set up logging
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
+
+        # Create file handler
+        log_file = os.path.join(
+            self.directories['logs'], 
+            f'archiver_{self.current_time}.log'
+        )
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
         
         # Create console handler
         console_handler = logging.StreamHandler()
@@ -121,9 +133,11 @@ class S3toS3Archiver:
         
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
         
         # Add handlers to logger
+        self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
         
         # Validate options
@@ -154,7 +168,7 @@ class S3toS3Archiver:
         self.file_batch_queue = queue.Queue(maxsize=self.num_threads * 2)
         
         # Set timestamp for file naming
-        self.current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
+        #self.current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.tar_sequence = 0
         
         # Track start time
@@ -162,6 +176,24 @@ class S3toS3Archiver:
         
         # Set delimiter for manifest files
         self.DELIMITER = '|'
+
+    def _create_directories(self):
+        """Create necessary directories for archives, manifests, and logs"""
+        directories = {
+            #'archives': os.path.join(self.dst_prefix, 'archives'),
+            #'manifests': os.path.join(self.dst_prefix, 'manifests'),
+            #'logs': os.path.join(self.dst_prefix, 'logs')
+            'logs': os.path.join('logs', self.dst_prefix)
+        }
+        
+        for dir_name, dir_path in directories.items():
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+                print(f"Created directory: {dir_path}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to create {dir_name} directory: {str(e)}")
+        
+        return directories
 
     def _is_batch_full(self, batch_files, current_size):
         """Check if the current batch is full based on the chosen strategy"""
@@ -242,7 +274,6 @@ class S3toS3Archiver:
 
     def _create_manifest_entry(self, file_info, content, tar_key, start_pos, end_pos):
         """Create a manifest entry for a file with position information"""
-        current_date = datetime.now().strftime('%Y-%m-%d')
         hash_enabled = True
 
         if hash_enabled:
@@ -250,7 +281,7 @@ class S3toS3Archiver:
             return (
                 f"{tar_key}{self.DELIMITER}"
                 f"{file_info.key}{self.DELIMITER}"
-                f"{current_date}{self.DELIMITER}"
+                f"{self.current_time}{self.DELIMITER}"
                 f"{file_info.size}{self.DELIMITER}"
                 f"{start_pos}{self.DELIMITER}"
                 f"{end_pos}{self.DELIMITER}"
@@ -260,7 +291,7 @@ class S3toS3Archiver:
             return (
                 f"{tar_key}{self.DELIMITER}"
                 f"{file_info.key}{self.DELIMITER}"
-                f"{current_date}{self.DELIMITER}"
+                f"{self.current_time}{self.DELIMITER}"
                 f"{file_info.size}{self.DELIMITER}"
                 f"{start_pos}{self.DELIMITER}"
                 f"{end_pos}{self.DELIMITER}"

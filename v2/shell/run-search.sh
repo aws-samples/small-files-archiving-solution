@@ -1,7 +1,7 @@
 #!/bin/bash
 
-program="apps/search.py"
-bucket_name="your-dst-bucket"
+program="../apps/search.py"
+bucket_name="your-dest-bucket"
 prefix="day999/manifests"
 
 # search by name
