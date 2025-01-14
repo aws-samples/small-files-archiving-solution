@@ -153,6 +153,7 @@ You can find required parameters from __Search__ result.
 ![restoring](images/v2/restore-result.png)
 
 - access streamlit workstation
+- find restored file in $git_repo/v2/restored_data directory
 ```bash
 [ec2-user@ip v2]$ ls -l restored_data/d0001/dir0018/index.html
 -rw-rw-r-- 1 ec2-user ec2-user 44 Dec 30  2019 restored_data/d0001/dir0018/index.html
