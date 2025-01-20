@@ -1,7 +1,7 @@
 #!/bin/bash
 
 program="search_item.py"
-bucket_name="your-own-dest-seoul"
+bucket_name="your-bucket"
 prefix="d1000/manifests/"
 
 # search by name

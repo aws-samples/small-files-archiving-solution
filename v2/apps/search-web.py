@@ -82,7 +82,7 @@ def update_selection():
 st.title("Searching files in Amazon S3")
 
 # Input for bucket name and prefix
-bucket_name = st.text_input("Enter S3 bucket", value="your-own-dest-bucket")
+bucket_name = st.text_input("Enter S3 bucket", value="your-bucket")
 prefix = st.text_input("Enter Prefix", value="day101/manifests")
 
 # define sidebar
