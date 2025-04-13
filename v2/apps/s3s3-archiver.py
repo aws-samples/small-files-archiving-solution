@@ -306,7 +306,8 @@ class S3toS3Archiver:
                 break
 
             # Generate tar filename
-            tar_key = f"{self.dst_prefix}/archives/archive_{self.current_time}_{batch.batch_number}.tar"
+            mid_prefix = self.current_time.split('_')[0]
+            tar_key = f"{self.dst_prefix}/archives/{mid_prefix}/archive_{self.current_time}_{batch.batch_number}.tar"
             if self.compress:
                 tar_key += ".gz"
 
@@ -373,8 +374,9 @@ class S3toS3Archiver:
 
     def _upload_archive_and_manifest(self, tar_buffer, manifest_entries, batch_number, tar_key, t_sc, m_sc):
         """Upload tar archive and manifest to destination S3"""
+        mid_prefix = self.current_time.split('_')[0]
         try:
-            manifest_key = f"{self.dst_prefix}/manifests/manifest_{self.current_time}_{batch_number}.csv"
+            manifest_key = f"{self.dst_prefix}/manifests/{mid_prefix}/manifest_{self.current_time}_{batch_number}.csv"
 
             # Upload tar file
             tar_buffer.seek(0)

@@ -21,6 +21,11 @@ import argparse
 from argparse import ArgumentTypeError
 from distutils import util
 
+# Global variables
+REGION=None
+#ENDPOINT=None
+#
+
 def parse_size(size_str: str) -> int:
     """Convert human readable size string to bytes"""
     size_str = size_str.strip().upper()
@@ -95,6 +100,7 @@ class FS2S3Archiver:
         self.num_threads = args.num_threads
         self.compress = args.compress
         self.profile_name = args.profile_name
+        self.endpoint = args.endpoint
         self.input_file = args.input_file  # New parameter for input file
         self.current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.tar_storageclass = args.tar_storageclass
@@ -174,7 +180,7 @@ class FS2S3Archiver:
     def _get_s3_client(self):
         """Initialize s3 client"""
         session = boto3.Session(profile_name=self.profile_name)
-        return session.client('s3')
+        return session.client('s3', region_name=REGION, endpoint_url=self.endpoint)
 
     def _create_directories(self):
         """Create necessary directories for archives, manifests, and logs"""
@@ -464,7 +470,7 @@ class FS2S3Archiver:
     def _tar_creator_consumer(self):
         """Consumes file batches from the queue and creates tar archives"""
         thread_name = threading.current_thread().name
-        current_date = datetime.now().strftime('%Y-%m-%d')
+        current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         # enable compress
         if self.compress:
@@ -494,9 +500,11 @@ class FS2S3Archiver:
                     tar_filename = f"archive_{batch_id}{tar_ext}"
                     manifest_filename = f"manifest_{batch_id}.csv"
                 
-                tar_path = self.dst_prefix + "/archives/" + tar_filename
-                manifest_path = self.dst_prefix + "/manifests/" + manifest_filename
-                
+                mid_prefix = self.current_time.split('_')[0]
+                print(f"mid_prefix: {mid_prefix}")
+                tar_path = self.dst_prefix + "/archives/" +  mid_prefix + "/" + tar_filename
+                manifest_path = self.dst_prefix + "/manifests/" + mid_prefix + "/" +  manifest_filename
+
                 # Create tar archive
                 try:
                     manifest_content = []
@@ -587,6 +595,7 @@ class FS2S3Archiver:
                 except Exception as e:
                     self.logger.error(f"{thread_name}: Failed to create archive {tar_filename}: {str(e)}")
                     self.logger.exception(f"{thread_name}: Failed to create archive {tar_filename}: {str(e)}")
+                    self._update_stats(failed=len(batch.files)) #kyongki
                     # Attempt to clean up partial files
                     for file in [tar_path, manifest_path]:
                         if os.path.exists(file):
@@ -635,6 +644,7 @@ def main():
     parser.add_argument('--compress', type=lambda x: bool(util.strtobool(x)), default=False,
                       help='Whether to compress the tar files')
     parser.add_argument('--profile-name', default='default', help='AWS profile name')
+    parser.add_argument('--endpoint', default=None, help='endpoint_url')
     parser.add_argument('--input-file', help='Path to a file containing list of files to process')
     parser.add_argument('--tar-storageclass', default='STANDARD', help='Storage Class for TAR file')
     parser.add_argument('--manifest-storageclass', default='STANDARD', help='Storage Class for manifest file')

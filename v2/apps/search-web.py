@@ -18,19 +18,17 @@ if 'selected_stop_byte' not in st.session_state:
 if 'selected_index' not in st.session_state:
     st.session_state.selected_index = None
 
-def run_search(bucket_name, prefix, search_type, search_value, end_value=None):
+def run_search(bucket_name, prefix, search_value, start_value, end_value):
     program = "apps/search.py"
 
     cmd = [
         "python3", program,
         "--bucket", bucket_name,
         "--prefix", prefix,
-        "--search_type", search_type,
-        "--search_value", search_value
+        "--search_value", search_value,
+        "--start_value", start_value,
+        "--end_value", end_value,
     ]
-
-    if end_value:
-        cmd.extend(["--end_value", end_value])
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.stdout
@@ -82,33 +80,32 @@ def update_selection():
 st.title("Searching files in Amazon S3")
 
 # Input for bucket name and prefix
-bucket_name = st.text_input("Enter S3 bucket", value="your-bucket")
-prefix = st.text_input("Enter Prefix", value="day101/manifests")
+bucket_name = st.text_input("Enter S3 bucket(ex, your-bucket-name)")
+prefix = st.text_input("Enter Prefix(ex: prefix1/nextprefix)")
 
 # define sidebar
 #page = st.sidebar.selectbox("Menu", ["Search", "Restore"])
 
 st.header("Search archived file in S3")
-search_type = st.radio("Search Type", ["Name", "Date"])
 
-if search_type == "Name":
-    search_value = st.text_input("Enter file name to search")
-    end_value = None
-else:
-    col1, col2 = st.columns(2)
-    with col1:
-        search_value = st.date_input("Start Date")
-    with col2:
-        end_value = st.date_input("End Date")
+# get key name to search
+search_value = st.text_input("Enter file name to search", value="%")
+end_value = None
 
-    search_value = search_value.strftime("%Y-%m-%d")
-    end_value = end_value.strftime("%Y-%m-%d")
+# get date to search
+col1, col2 = st.columns(2)
+with col1:
+    start_value = st.date_input("Start Date")
+with col2:
+    end_value = st.date_input("End Date")
+start_value = start_value.strftime("%Y-%m-%d")
+end_value = end_value.strftime("%Y-%m-%d")
 
 if st.button("Search"):
 
     if bucket_name and prefix and search_value:
         with st.spinner("Running archiver..."):
-            result = run_search(bucket_name, prefix, search_type.lower(), search_value, end_value)
+            result = run_search(bucket_name, prefix, search_value, start_value, end_value)
         parsed_df = parse_output(result)
     
         st.session_state.parsed_df = parse_output(result)
