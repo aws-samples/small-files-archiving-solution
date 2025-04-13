@@ -1,5 +1,8 @@
 # Small Files Archiving Solution
 ## Change Log
+- 2025.04.13:
+  - "search" is changed to query from AWS Athena, not downloaing csv files
+  - "directory structure in S3" is changed to "bucket / prefix / (archives | manifests) / {date} / {files}"
 - 2025.01.13: v2 released
   - Support GUI based operation
 - 2024.02.25: v1 released
@@ -73,13 +76,13 @@ After running a script, you will see url address to access, then open this url o
   - navigate s3 console to destination bucket and prefix.
   - confirm new prefix for archived files and manifests files
 ```bash
-ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/
-                           PRE archives/
-                           PRE manifests/
+ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/factory1/
+                           PRE archives/20250113/
+                           PRE manifests/20250113/
 ```
   - confirm tarfiles in __archives__ prefix
 ```bash
-ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/archives/ 
+ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/factory1/archives/20250123/ 
 2025-01-13 17:06:21   10895360 archive_20250113_080619_0001.tar
 2025-01-13 17:06:21   10885120 archive_20250113_080619_0002.tar
 2025-01-13 17:06:20   10905600 archive_20250113_080619_0003.tar
@@ -103,7 +106,7 @@ ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/archives/
 ```
   - confirm manifest files in __manifests__ prefix
 ```bash
-ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/manifests/ 
+ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/factory1/manifests/20250123/ 
 2025-01-13 17:06:21      84191 manifest_20250113_080619_0001.csv
 2025-01-13 17:06:21      82740 manifest_20250113_080619_0002.csv
 2025-01-13 17:06:21      82755 manifest_20250113_080619_0003.csv
@@ -129,6 +132,7 @@ ec2-user@ip v2% aws s3 ls s3://your-dst-bucket/day20250123/manifests/
 
 #### Logs
 Whenever archiving program runs, it generate logfile under __logs__ /__{dst_prefix}__ directory. With this logs, you can find out errors, result messages.
+For the long-time job, web streamlit app might be stalled. At this time, please check log file to confirm job completed well.
 
 ### Searching
 1. Select "Search" from the sidebar.
