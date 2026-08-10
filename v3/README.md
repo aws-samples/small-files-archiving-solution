@@ -100,11 +100,47 @@ python fss3-archiver-s3tables-mp.py \
 | `--table-bucket-arn` | S3 Tables table bucket ARN | (required) |
 | `--namespace` / `--table-name` | manifest namespace / table | archive / manifest |
 | `--batch-size` | rows per manifest commit | 50000 |
-| `--tar-storageclass` | storage class for tar objects | GLACIER_IR |
+| `--tar-storageclass` | storage class for tar objects (see below) | GLACIER_IR |
 | `--spool-max-mb` | in-memory threshold for a tar (spills to disk above it) | 256 |
 | `--compress` | gzip the tar (⚠️ see limitations) | off |
 
 Storage layout: tars go to `s3://<bucket>/<prefix>/<YYYYMMDD>/archive_*.tar`; the manifest is written to the S3 Tables table.
+
+#### `--tar-storageclass` values
+
+The value is passed straight through to S3 `PutObject`, so any S3 storage class is accepted. For this solution the one that matters is **whether individual-file restore (§4.2) works immediately or needs a whole-tar restore first**:
+
+| Class | Individual restore (§4.2) | Notes |
+|---|---|---|
+| `GLACIER_IR` | ✅ immediate | **default.** Glacier Instant Retrieval — archive pricing, millisecond ranged GET. Best fit for cold archives you still occasionally read. |
+| `STANDARD` | ✅ immediate | most expensive to store; use only for hot data. |
+| `STANDARD_IA` / `ONEZONE_IA` | ✅ immediate | infrequent access; per-GB retrieval fee. `ONEZONE_IA` is single-AZ (cheaper, lower durability). |
+| `INTELLIGENT_TIERING` | ✅ immediate* | auto-tiers by access. *Ranged GET is immediate unless an object has moved to the optional Archive Access tiers. |
+| `GLACIER` (Flexible Retrieval) | ⚠️ restore first | cheaper storage, but §4.2 fails until you restore the whole tar (minutes–hours). |
+| `DEEP_ARCHIVE` | ⚠️ restore first | cheapest storage; whole-tar restore takes up to ~12 h. |
+
+> **Rule of thumb:** if you ever need to pull single files back without a wait, keep tars in `GLACIER_IR` (the default). Only move to `GLACIER` / `DEEP_ARCHIVE` when the data is truly write-once and you accept a restore delay for the whole tar. Classes like `REDUCED_REDUNDANCY`, `EXPRESS_ONEZONE`, `OUTPOSTS`, `SNOW`, and `FSX_*` exist in the API but are not meaningful for this archiving workflow.
+
+#### `--max-files` (`--max-size`) vs `--batch-size`
+
+These two look similar but control **different stages** and never interact:
+
+| Option | What it splits | Stage | Effect |
+|---|---|---|---|
+| `--max-files` / `--max-size` | files → **tar bundle** | upload (input) | number/size of **tar objects** in S3 |
+| `--batch-size` | manifest rows → **one commit** | S3 Tables write (output) | number of Iceberg **commits (snapshots)** |
+
+- **`--max-files` / `--max-size`** — how many files (or how many bytes) go into one tar. The scanner cuts a new tar when the running count/size hits the limit. Pick exactly one. This determines the size of each S3 tar object (and thus your PUT-request and small-object savings). Size-based (`--max-size 20MB`) is usually preferred so objects stay uniform even when file sizes vary.
+- **`--batch-size`** — how many manifest rows (**one row per file**, not per tar) the single writer accumulates before appending to S3 Tables. Default 50,000. Small values create frequent commits → many small files / snapshots in the manifest → slower queries, so keep it large for big runs.
+
+Worked example — 1M files:
+
+```
+--max-files 1000    → ~1,000 tar objects        (S3 object count)
+--batch-size 50000  → ~21 manifest commits      (Iceberg snapshot count)
+```
+
+Think of it as: `--max-files` decides how many **boxes** you pack the files into; `--batch-size` decides how many **packing-list rows** you record per ledger entry. Changing one does not change the other.
 
 ### Manifest schema (S3 Tables)
 
@@ -133,27 +169,38 @@ WHERE source_key LIKE '%file0499%'
 
 ### 4.2 Restore — extract an individual file via byte-range GET
 
-```python
-import boto3, io, tarfile
-from pyiceberg.catalog import load_catalog
+Use `fss3-restore.py`. It fetches only the byte range holding the file — the archiver records `byte_start` at the file's tar header and `byte_end` at the end of its padding, so that range is a self-contained single-member tar that `tarfile` opens directly. No full-tar download.
 
-cat = load_catalog("s3tables", **{
-    "type": "rest",
-    "warehouse": "arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>",
-    "uri": "https://s3tables.ap-northeast-2.amazonaws.com/iceberg",
-    "rest.sigv4-enabled": "true", "rest.signing-name": "s3tables",
-    "rest.signing-region": "ap-northeast-2"})
-df = cat.load_table("archive.manifest").scan().to_pandas()
-row = df[df.source_key.str.contains("file0499")].iloc[0]
+**Note:** the manifest stores `tar_key` but **not** the bucket, so `--tar-bucket` is always required.
 
-s3 = boto3.client("s3")
-resp = s3.get_object(Bucket="your-own-dest-bucket", Key=row.tar_key,
-                     Range=f"bytes={int(row.byte_start)}-{int(row.byte_end)}")
-tf = tarfile.open(fileobj=io.BytesIO(resp["Body"].read()))
-data = tf.extractfile(tf.getnames()[0]).read()   # the individual file's bytes
+**DIRECT mode** — you already have the offsets (e.g. from the 4.1 query):
+
+```bash
+python fss3-restore.py \
+  --tar-bucket       your-own-dest-bucket \
+  --tar-key          20260804/20260804/archive_20260804_120000_00001.tar \
+  --byte-start       1536 \
+  --byte-end         21503 \
+  --out              ./restored/file0499.dat
 ```
 
-This fetches only the byte range holding the file, without downloading the whole tar. **However, if the tar is in Glacier Flexible Retrieval / Deep Archive, you must first restore the entire tar (hours) before this works.** If you need millisecond, no-wait retrieval, keep tars in `GLACIER_IR` (the default).
+**LOOKUP mode** — you only know the original path; the script queries the manifest (exact `source_key` match with Iceberg predicate pushdown — no full-table scan) and resolves the offsets itself:
+
+```bash
+python fss3-restore.py \
+  --region           ap-northeast-2 \
+  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
+  --namespace        archive \
+  --table-name       manifest \
+  --source-key       sub/file0499.dat \
+  --tar-bucket       your-own-dest-bucket \
+  --out-dir          ./restored/ \
+  --verify-md5
+```
+
+`--out` writes to an exact path; `--out-dir` preserves the file's archived relative path underneath. `--verify-md5` (LOOKUP) checks the extracted bytes against the manifest MD5; in either mode `--verify-md5 <hex>` checks an explicit value. If a `source_key` matches more than one row (same path archived in multiple runs), LOOKUP picks the newest `archive_ts` and warns — query 4.1 and use DIRECT with an explicit `--tar-key` to pick a specific one.
+
+**Storage-class caveats:** this works with `GLACIER_IR` (the default) with no wait. **If the tar is in Glacier Flexible Retrieval / Deep Archive, you must first restore the entire tar (hours) before a ranged GET succeeds** — the script detects this and errors clearly. Files archived with `--compress` have offsets of `-1` and cannot be range-restored; extract the whole `.tar.gz` instead.
 
 ---
 
@@ -201,6 +248,8 @@ At this scale (~20 GB source, 979 tars, 1M manifest rows) the monthly storage co
 ### 5.5 Integrity verification
 
 Files were sampled from the first, middle, and last tars and restored from the actual tar via byte-range GET using the offset in the S3 Tables manifest. **Filename, size, and (when enabled) MD5 all matched.** The correctness of single-pass MD5 and physical tar offsets was confirmed against real S3.
+
+`fss3-restore.py` itself was also verified end-to-end against real S3 + S3 Tables (a 523,123-row manifest, MD5 on). Both **DIRECT** and **LOOKUP** modes restored individual files via byte-range GET; the extracted bytes matched the manifest MD5 and were **byte-identical (`cmp`) to the originals**. Failure paths behaved correctly too — a wrong `--verify-md5`, a missing `source_key`, and specifying both modes at once each exited non-zero with a clear message.
 
 ---
 
