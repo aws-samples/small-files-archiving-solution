@@ -6,6 +6,15 @@ An archiving solution that **bundles** large numbers of small filesystem files i
 
 Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution), this version moves the manifest from CSV objects to S3 Tables and reworks the internals with single-pass MD5, streaming tar, batched commits, and multiprocess parallelism.
 
+### Key features
+
+- **File bundling** — packs many small files into large tar objects, cutting PUT requests and sidestepping the small-object storage penalty (e.g. Glacier IR 128 KB minimum billing).
+- **S3 Tables manifest** — records every file's `tar_key` + byte range in a managed Apache Iceberg table, so an individual file stays locatable inside a tar.
+- **Direct individual-file restore** — extracts a single file straight from its tar via byte-range GET, without downloading the whole tar (`v3/fss3-restore.py`).
+- **Two input modes** — walk a directory (`--src-path`), or archive an explicit `--input-file` list of files (from a DB export, `find`, or a change-list).
+- **Optional per-file MD5** — single-pass integrity hashing (`--md5`), verified on restore.
+- **Multiprocess parallelism** — tar packing and upload run across worker processes, bypassing the GIL; manifest commits are batched to avoid Iceberg small-file/snapshot explosion.
+
 > ⚠️ Not official AWS documentation. This is field-test material.
 
 ---
@@ -24,7 +33,7 @@ Bundling files into large tars (e.g. 20 MB) cuts the object count by hundreds to
 ### Architecture
 
 ```
-File scanner
+File source (directory walk of --src-path, or an explicit --input-file list)
    └─ splits the file list into batches by size (--max-size) or count (--max-files)
         └─ ProcessPoolExecutor (N worker processes)
               │  each worker: build tar (optional MD5) + S3 multipart upload
@@ -87,11 +96,29 @@ python v3/fss3-archiver-s3tables-mp.py \
   --tar-storageclass GLACIER_IR
 ```
 
+#### Archiving an explicit file list (`--input-file`)
+
+Instead of walking `--src-path`, you can feed a text file listing the exact files to archive — one absolute path per line (blank lines and `#` comments are skipped). Files that don't exist are logged and counted as failures but don't stop the run. `--src-path` is still required: it's used to derive each tar member's relative path (the path is stored relative to `--src-path` when it lies underneath it, otherwise the full path is used).
+
+```bash
+python v3/fss3-archiver-s3tables-mp.py \
+  --src-path         /data/nfsshare \
+  --input-file       files-to-archive.txt \
+  --dst-bucket       your-own-dest-bucket \
+  --dst-prefix       20260804 \
+  --max-files        1000 \
+  --region           ap-northeast-2 \
+  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>
+```
+
+This is useful when the file set comes from an external source (e.g. a database export, a `find` result, or a change-list) rather than a full directory scan.
+
 ### Key parameters
 
 | Parameter | Description | Default |
 |---|---|---|
-| `--src-path` | source directory to archive (recursed) | (required) |
+| `--src-path` | source directory to archive (recursed); with `--input-file`, the base used to compute each file's relative path | (required) |
+| `--input-file` | text file listing files to archive (one path per line; `#` comments and blank lines skipped) instead of walking `--src-path` | off (walk) |
 | `--dst-bucket` / `--dst-prefix` | S3 bucket / prefix for tars | (required) |
 | `--max-size` **or** `--max-files` | per-tar size (e.g. `512MB`) or file count (pick one) | (required) |
 | `--num-workers` | tar-build/upload worker processes | `os.cpu_count()` |
