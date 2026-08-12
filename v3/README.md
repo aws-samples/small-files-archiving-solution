@@ -6,6 +6,15 @@ An archiving solution that **bundles** large numbers of small filesystem files i
 
 Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution), this version moves the manifest from CSV objects to S3 Tables and reworks the internals with single-pass MD5, streaming tar, batched commits, and multiprocess parallelism.
 
+### Key features
+
+- **File bundling** — packs many small files into large tar objects, cutting PUT requests and sidestepping the small-object storage penalty (e.g. Glacier IR 128 KB minimum billing).
+- **S3 Tables manifest** — records every file's `tar_key` + byte range in a managed Apache Iceberg table, so an individual file stays locatable inside a tar.
+- **Direct individual-file restore** — extracts a single file straight from its tar via byte-range GET, without downloading the whole tar (`fss3-restore.py`).
+- **Two input modes** — walk a directory (`--src-path`), or archive an explicit `--input-file` list of files (from a DB export, `find`, or a change-list).
+- **Optional per-file MD5** — single-pass integrity hashing (`--md5`), verified on restore.
+- **Multiprocess parallelism** — tar packing and upload run across worker processes, bypassing the GIL; manifest commits are batched to avoid Iceberg small-file/snapshot explosion.
+
 > ⚠️ Not official AWS documentation. This is field-test material.
 
 ---
