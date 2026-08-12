@@ -135,7 +135,7 @@ Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-i
 | `--dst-bucket` / `--dst-prefix` | S3 bucket / prefix for tars | (required) |
 | `--max-size` **or** `--max-files` | per-tar size (e.g. `512MB`) or file count (pick one) | (required) |
 | `--num-workers` | tar-build/upload worker processes | `os.cpu_count()` |
-| `--md5` | compute and store per-file MD5 for integrity verification — always enable it | on (recommended) |
+| `--md5` | compute and store per-file MD5 for integrity verification | on (default) |
 | `--region` | AWS region | (required) |
 | `--table-bucket-arn` | S3 Tables table bucket ARN | (required) |
 | `--namespace` / `--table-name` | manifest namespace / table | archive / manifest |
@@ -189,7 +189,7 @@ Think of it as: `--max-files` decides how many **boxes** you pack the files into
 | `tar_key` | string | S3 key of the tar containing the file |
 | `source_key` | string | original file relative path |
 | `byte_start` / `byte_end` | long | byte range within the tar (for Range GET) |
-| `md5` | string | MD5 of the original file (with `--md5`), else null |
+| `md5` | string | MD5 of the original file (computed by default; null only if disabled) |
 | `filesize` | long | original file size |
 | `archive_ts` | timestamptz | archive time (partition: `day(archive_ts)`) |
 
@@ -290,4 +290,5 @@ Files were sampled from the first, middle, and last tars and restored from the a
 - **If you need Object Lock (WORM), configure versioning + Object Lock on the tar destination bucket separately.** (S3 Tables table buckets do not support Object Lock.)
 - **Throughput depends on network bandwidth.** For on-premises → S3 transfers, bandwidth is likely the bottleneck.
 - **For large runs, keep `--batch-size` large** (default 50,000). Small values create many small files in the manifest and can slow queries.
+- **Tar upload and manifest commit are not atomic.** If the process crashes after a tar uploads but before its rows commit to S3 Tables, that tar is an orphan — archived but not findable/restorable. To detect orphans after a run, reconcile the tar objects under the destination prefix against the distinct `tar_key` values in the manifest.
 - Tested with Python 3.12.1 / pyiceberg 0.11.1.

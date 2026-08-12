@@ -135,7 +135,7 @@ python fss3-archiver-s3tables-mp.py \
 | `--dst-bucket` / `--dst-prefix` | tar 저장 S3 버킷 / prefix | (필수) |
 | `--max-size` **또는** `--max-files` | tar 1개당 크기(예 `512MB`) 또는 파일 개수 (택1) | (필수) |
 | `--num-workers` | tar 생성·전송 워커 프로세스 수 | `os.cpu_count()` |
-| `--md5` | 무결성 검증용 파일별 MD5 계산·저장 — 항상 켜세요 | on (권장) |
+| `--md5` | 무결성 검증용 파일별 MD5 계산·저장 | on (기본값) |
 | `--region` | AWS 리전 | (필수) |
 | `--table-bucket-arn` | S3 Tables 테이블 버킷 ARN | (필수) |
 | `--namespace` / `--table-name` | 매니페스트 네임스페이스 / 테이블 | archive / manifest |
@@ -189,7 +189,7 @@ python fss3-archiver-s3tables-mp.py \
 | `tar_key` | string | 파일이 담긴 tar의 S3 키 |
 | `source_key` | string | 원본 파일 상대 경로 |
 | `byte_start` / `byte_end` | long | tar 내 byte 범위 (Range GET용) |
-| `md5` | string | 원본 파일 MD5 (`--md5` 시), 아니면 null |
+| `md5` | string | 원본 파일 MD5 (기본 계산; 비활성화한 경우에만 null) |
 | `filesize` | long | 원본 파일 크기 |
 | `archive_ts` | timestamptz | 아카이빙 시각 (파티션: `day(archive_ts)`) |
 
@@ -290,4 +290,5 @@ single-pass 해싱은 추가 읽기가 없어(tar 생성을 위해 어차피 읽
 - **Object Lock(WORM)이 필요하면 tar 저장 버킷에 버저닝 + Object Lock을 별도 설정하세요.** (S3 Tables 테이블 버킷은 Object Lock 미지원.)
 - **처리율은 네트워크 대역폭에 좌우됩니다.** 온프레미스 → S3 전송 시에는 대역폭이 병목이 될 수 있습니다.
 - **대량 처리 시 `--batch-size`를 크게 유지하세요** (기본 50,000). 작은 값은 매니페스트에 작은 파일이 많아져 조회 성능이 떨어질 수 있습니다.
+- **tar 업로드와 매니페스트 커밋은 원자적이지 않습니다.** tar가 업로드된 뒤 해당 행이 S3 Tables에 커밋되기 전에 프로세스가 죽으면, 그 tar는 고아(orphan)가 됩니다 — 저장은 됐지만 조회·복원이 불가합니다. 실행 후 고아를 찾으려면 대상 prefix 아래의 tar 오브젝트와 매니페스트의 고유 `tar_key` 값을 대조하세요.
 - 테스트는 Python 3.12.1 / pyiceberg 0.11.1 기준입니다.

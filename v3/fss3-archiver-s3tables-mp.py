@@ -469,13 +469,27 @@ class FS2S3ArchiverMP:
             f"Starting: workers={self.num_workers}, md5={'on' if self.do_md5 else 'off'}, "
             f"compress={self.compress}")
 
+        class WriterDied(RuntimeError):
+            """Manifest writer is gone; the run must abort, not continue."""
+
+        def check_writer():
+            """Abort promptly if the manifest writer died (bad table-bucket ARN,
+            auth failure, commit retries exhausted). Without this check the run
+            would keep uploading tars that get NO manifest rows (all orphans),
+            and once the bounded queue filled, put() would block forever."""
+            if not writer.is_alive():
+                raise WriterDied(
+                    f"manifest writer died, aborting before more orphan tars "
+                    f"are uploaded: {writer.error}")
+
         def collect(fut):
             """Collect one finished future's result in the MAIN thread (no callback,
             no cross-thread queue deadlock)."""
             try:
                 res = fut.result()
                 for r in res["rows"]:
-                    self.manifest_queue.put(r)
+                    check_writer()
+                    self.manifest_queue.put(r, timeout=60)
                 # count a tar only when one was actually uploaded (rows > 0)
                 self._update(files=res["count"], failed=res["failed"],
                              tars=1 if res["count"] else 0, nbytes=res["total_bytes"])
@@ -483,6 +497,11 @@ class FS2S3ArchiverMP:
                     self.logger.info(
                         f"tar {res['tar_key'].split('/')[-1]} "
                         f"({res['count']} files, {self._human(res['total_bytes'])})")
+            except WriterDied:
+                raise  # abort the run, don't swallow as a batch failure
+            except queue.Full:
+                check_writer()  # most likely cause; raises WriterDied with detail
+                raise           # writer alive but stalled >60s: still abort
             except Exception as e:
                 # whole batch lost (e.g. upload failed after retries): every file
                 # in it failed, so attribute the full batch size, not 1.
@@ -509,6 +528,7 @@ class FS2S3ArchiverMP:
             inflight = []
             batch_no = 0
             for batch in self._scan_batches():
+                check_writer()  # stop submitting once the writer is gone
                 batch_no += 1
                 tar_key = (f"{self.dst_prefix}/{self.mid_prefix}/"
                            f"archive_{self.current_time}_{batch_no:05d}{ext}")
