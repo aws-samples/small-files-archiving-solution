@@ -6,16 +6,16 @@ Multiprocess variant of the filesystem -> S3 archiver with an Amazon S3 Tables
 
 What changed vs the threaded version:
   * tar build + upload run in a PROCESS pool (ProcessPoolExecutor) instead of a
-    thread pool -> CPU-bound work (tar packing, optional MD5) runs in parallel
-    across cores, bypassing the Python GIL.
-  * MD5 is OPTIONAL (--md5 / --no-md5). When off, the md5 column is null and each
-    source file is streamed into the tar without hashing (less CPU).
+    thread pool -> CPU-bound work (tar packing, MD5) runs in parallel across
+    cores, bypassing the Python GIL.
+  * MD5 is computed by default (--md5, on) for integrity verification; single-pass
+    hashing adds no extra read. --no-md5 disables it (md5 column null) if needed.
   * Worker count defaults to os.cpu_count() (tunable via --num-workers).
 
 Flow:
   main process
     scanner --> batches --> ProcessPoolExecutor (N worker processes)
-                               each worker: build tar (opt. MD5) + S3 multipart upload
+                               each worker: build tar (+ MD5) + S3 multipart upload
                                returns manifest rows (small) back to main
     done-callback --> manifest queue --> single writer thread --> S3 Tables batch commit
 
@@ -28,10 +28,15 @@ Design notes for multiprocessing correctness:
   * The single manifest writer stays in the main process (I/O bound) so commits
     remain serialized -> no Iceberg OCC conflicts, no small-file/snapshot explosion.
 
+Durability caveat: a tar upload and its manifest commit are not atomic. A crash
+after a tar uploads but before its rows commit leaves an orphan tar with no
+manifest entry (archived but not findable/restorable). To detect this, reconcile
+the tar objects under the destination prefix against distinct tar_key values in
+the manifest after a run.
+
 Requires: pip install "pyiceberg[pyarrow]" boto3   (Python 3.9+)
 """
 import os
-import io
 import stat
 import time
 import queue
@@ -76,7 +81,7 @@ def parse_size(size_str: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Single-pass MD5 reader (used only when --md5 is enabled)
+# Single-pass MD5 reader (used when MD5 is enabled, which is the default)
 # --------------------------------------------------------------------------- #
 class HashingReader:
     def __init__(self, fileobj):
@@ -117,7 +122,9 @@ def _init_worker(profile, region, storageclass, mp_threshold, mp_chunksize, uplo
 
 def _process_batch(task):
     """Runs in a worker process. task keys:
-       files [(full, rel, size)...], tar_key, bucket, compress, do_md5, spool_max"""
+       files [(full, rel, size)...], tar_key, bucket, compress, do_md5, spool_max.
+       Raises on upload failure so the main process attributes the whole batch as
+       failed (nfiles). Skips the upload entirely if no member packed."""
     s3 = _WORKER["s3"]
     tconf = _WORKER["tconf"]
     sclass = _WORKER["storageclass"]
@@ -155,21 +162,36 @@ def _process_batch(task):
                 except Exception:
                     failed += 1
 
-        # upload tar with retry
-        last_err = None
+        # Nothing packed (every file in the batch failed) -> don't upload an
+        # empty tar; just report the per-file failures.
+        if not rows:
+            return {"tar_key": task["tar_key"], "rows": [],
+                    "failed": failed, "total_bytes": 0, "count": 0}
+
+        # upload tar with retry. Keep the FIRST error: boto3 closes the fileobj
+        # on a failed transfer, so a later spool.seek(0) would raise a generic
+        # "I/O operation on closed file" that masks the real cause (e.g.
+        # NoSuchBucket). Once the spool is closed there's nothing to retry from,
+        # so stop and surface the original error rather than sleeping in vain.
+        first_err = None
         for attempt in range(5):
+            if spool.closed:
+                break
             try:
                 spool.seek(0)
                 s3.upload_fileobj(
                     spool, task["bucket"], task["tar_key"].lstrip("/"),
                     ExtraArgs={"StorageClass": sclass}, Config=tconf)
-                last_err = None
+                first_err = None
                 break
             except Exception as e:
-                last_err = e
+                if first_err is None:
+                    first_err = e
+                if spool.closed or attempt == 4:
+                    break
                 time.sleep(2 ** attempt)
-        if last_err is not None:
-            raise last_err
+        if first_err is not None:
+            raise first_err
     finally:
         spool.close()
 
@@ -306,8 +328,14 @@ class FS2S3ArchiverMP:
         self.current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.mid_prefix = self.current_time.split("_")[0]
 
-        if bool(self.max_files) == bool(self.max_size):
+        # exactly one of the two batching rules, and it must be positive
+        # (argparse's mutually-exclusive group already blocks passing both)
+        if (self.max_files is None) == (self.max_size is None):
             raise ValueError("Specify exactly one of --max-files or --max-size")
+        if self.max_files is not None and self.max_files <= 0:
+            raise ValueError("--max-files must be a positive integer")
+        if self.max_size is not None and self.max_size <= 0:
+            raise ValueError("--max-size must be positive")
 
         os.makedirs(os.path.join("logs", self.dst_prefix), exist_ok=True)
         self.logger = logging.getLogger("fss3-archiver-mp")
@@ -448,14 +476,19 @@ class FS2S3ArchiverMP:
                 res = fut.result()
                 for r in res["rows"]:
                     self.manifest_queue.put(r)
+                # count a tar only when one was actually uploaded (rows > 0)
                 self._update(files=res["count"], failed=res["failed"],
-                             tars=1, nbytes=res["total_bytes"])
-                self.logger.info(
-                    f"tar {res['tar_key'].split('/')[-1]} "
-                    f"({res['count']} files, {self._human(res['total_bytes'])})")
+                             tars=1 if res["count"] else 0, nbytes=res["total_bytes"])
+                if res["count"]:
+                    self.logger.info(
+                        f"tar {res['tar_key'].split('/')[-1]} "
+                        f"({res['count']} files, {self._human(res['total_bytes'])})")
             except Exception as e:
-                self.logger.error(f"batch failed: {e}")
-                self._update(failed=1)
+                # whole batch lost (e.g. upload failed after retries): every file
+                # in it failed, so attribute the full batch size, not 1.
+                nfiles = getattr(fut, "_nfiles", 1)
+                self.logger.error(f"batch failed ({nfiles} files): {e}")
+                self._update(failed=nfiles)
 
         # Sliding window: keep at most `max_inflight` tasks submitted at once so we
         # don't buffer millions of futures. Submit and drain are interleaved in the
@@ -482,7 +515,9 @@ class FS2S3ArchiverMP:
                 task = {"files": batch, "tar_key": tar_key,
                         "bucket": self.dst_bucket, "compress": self.compress,
                         "do_md5": self.do_md5, "spool_max": self.spool_max}
-                inflight.append(ex.submit(_process_batch, task))
+                fut = ex.submit(_process_batch, task)
+                fut._nfiles = len(batch)  # for accurate failure accounting
+                inflight.append(fut)
                 # drain oldest when window is full (FIFO keeps memory bounded)
                 if len(inflight) >= max_inflight:
                     collect(inflight.pop(0))
