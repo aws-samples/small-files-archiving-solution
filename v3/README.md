@@ -12,7 +12,7 @@ Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-sam
 - **S3 Tables manifest** — records every file's `tar_key` + byte range in a managed Apache Iceberg table, so an individual file stays locatable inside a tar.
 - **Direct individual-file restore** — extracts a single file straight from its tar via byte-range GET, without downloading the whole tar (`fss3-restore.py`).
 - **Two input modes** — walk a directory (`--src-path`), or archive an explicit `--input-file` list of files (from a DB export, `find`, or a change-list).
-- **Optional per-file MD5** — single-pass integrity hashing (`--md5`), verified on restore.
+- **Per-file MD5 integrity** — every file is hashed (single-pass, `--md5`) and the digest is stored in the manifest, so restores can be verified byte-for-byte. Integrity checking is essential for an archive, so always enable it.
 - **Multiprocess parallelism** — tar packing and upload run across worker processes, bypassing the GIL; manifest commits are batched to avoid Iceberg small-file/snapshot explosion.
 
 > ⚠️ Not official AWS documentation. This is field-test material.
@@ -116,12 +116,6 @@ The remaining scenarios are the baseline **with the noted flags changed**:
 
 One absolute path per line (blank lines and `#` comments skipped). Missing paths, symlinks, and non-regular files are skipped and logged, but don't stop the run. `--src-path` is still required — it's the base for each tar member's relative path (stored relative to `--src-path` when the file lies under it, else the full path with the leading `/` dropped).
 
-**Fastest archive — skip MD5** — leaves the `md5` column null; slightly less CPU:
-
-```bash
-  --no-md5                  # replaces --md5
-```
-
 **Cold, write-once data — compress:**
 
 ```bash
@@ -141,7 +135,7 @@ Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-i
 | `--dst-bucket` / `--dst-prefix` | S3 bucket / prefix for tars | (required) |
 | `--max-size` **or** `--max-files` | per-tar size (e.g. `512MB`) or file count (pick one) | (required) |
 | `--num-workers` | tar-build/upload worker processes | `os.cpu_count()` |
-| `--md5` / `--no-md5` | compute per-file MD5 (off = md5 column null, slightly faster) | off |
+| `--md5` | compute and store per-file MD5 for integrity verification — always enable it | on (recommended) |
 | `--region` | AWS region | (required) |
 | `--table-bucket-arn` | S3 Tables table bucket ARN | (required) |
 | `--namespace` / `--table-name` | manifest namespace / table | archive / manifest |
@@ -256,25 +250,15 @@ Test environment: EC2 (Amazon Linux, 8 vCPU, ap-northeast-2), source = NFS `/dat
 
 ### 5.1 Throughput
 
-1M files (fs1+fs2, 19.49 GB), 8 workers:
+1M files (fs1+fs2, 19.49 GB), 8 workers, MD5 on:
 
-| MD5 | Elapsed | Rate | Failures |
-|---|---|---|---|
-| off | 82.5s | **241.8 MB/s** | 0 |
-| on | 89.0s | 224.3 MB/s | 0 |
+| Elapsed | Rate | Failures |
+|---|---|---|
+| 89.0s | 224.3 MB/s | 0 |
 
-### 5.2 MD5 on/off comparison (same conditions)
+Single-pass hashing adds no extra read (the bytes are already being read to build the tar), so per-file MD5 is inexpensive on this transfer/I/O-dominated workload.
 
-Same data (1M files, 19.49 GB), 8 workers, multiprocess, consecutive runs (warm file cache), **MD5 is the only variable**:
-
-| | MD5 off | MD5 on | Delta |
-|---|---|---|---|
-| Elapsed | 82.5s | 89.0s | **+7.9%** |
-| Rate | 241.8 MB/s | 224.3 MB/s | -7.3% |
-
-**MD5 overhead is about 8%.** Single-pass hashing (computed while reading for the tar anyway) adds no extra read, and this environment is transfer/I/O dominated, so the MD5 CPU cost is relatively small. It is cheap relative to the integrity-check benefit, so **MD5 on is recommended** when restore-time integrity matters.
-
-### 5.3 Object consolidation and request reduction
+### 5.2 Object consolidation and request reduction
 
 For the 1M-file run:
 
@@ -285,15 +269,15 @@ For the 1M-file run:
 
 → About **1,000× fewer** PUT requests. Since each tar is 20 MB, it also avoids the GLACIER_IR 128 KB minimum-billing penalty entirely.
 
-### 5.4 Cost (approximate)
+### 5.3 Cost (approximate)
 
 At this scale (~20 GB source, 979 tars, 1M manifest rows) the monthly storage cost — GLACIER_IR tars plus the S3 Tables manifest — is **very low** (order of tens of cents/month). Keeping the manifest in S3 Tables does not inflate cost, because **batched commits (50,000 rows/commit)** avoid small-file / snapshot explosion, so it does not offset the bundling savings.
 
 > Compute exact figures from region/period-specific rates (the above is approximate).
 
-### 5.5 Integrity verification
+### 5.4 Integrity verification
 
-Files were sampled from the first, middle, and last tars and restored from the actual tar via byte-range GET using the offset in the S3 Tables manifest. **Filename, size, and (when enabled) MD5 all matched.** The correctness of single-pass MD5 and physical tar offsets was confirmed against real S3.
+Files were sampled from the first, middle, and last tars and restored from the actual tar via byte-range GET using the offset in the S3 Tables manifest. **Filename, size, and MD5 all matched.** The correctness of single-pass MD5 and physical tar offsets was confirmed against real S3.
 
 `fss3-restore.py` itself was also verified end-to-end against real S3 + S3 Tables (a 523,123-row manifest, MD5 on). Both **DIRECT** and **LOOKUP** modes restored individual files via byte-range GET; the extracted bytes matched the manifest MD5 and were **byte-identical (`cmp`) to the originals**. Failure paths behaved correctly too — a wrong `--verify-md5`, a missing `source_key`, and specifying both modes at once each exited non-zero with a clear message.
 
