@@ -80,6 +80,10 @@ s3tables:PutTableData, GetTableData
 
 ## 3. Usage
 
+Every run combines a **file source** (walk `--src-path`, or an explicit `--input-file` list) with a **batching rule** (`--max-size` or `--max-files`). The scenarios below all share the same destination/S3 Tables flags — only the source and batching choices change.
+
+**Baseline — bundle a directory into uniform-size tars (the common case):**
+
 ```bash
 python v3/fss3-archiver-s3tables-mp.py \
   --src-path         /data/nfsshare \
@@ -96,22 +100,37 @@ python v3/fss3-archiver-s3tables-mp.py \
   --tar-storageclass GLACIER_IR
 ```
 
-#### Archiving an explicit file list (`--input-file`)
+The remaining scenarios are the baseline **with the noted flags changed**:
 
-Instead of walking `--src-path`, you can feed a text file listing the exact files to archive — one absolute path per line (blank lines and `#` comments are skipped). Files that don't exist are logged and counted as failures but don't stop the run. `--src-path` is still required: it's used to derive each tar member's relative path (the path is stored relative to `--src-path` when it lies underneath it, otherwise the full path is used).
+**Fixed file count per tar** — cap each tar at N files instead of a size:
 
 ```bash
-python v3/fss3-archiver-s3tables-mp.py \
-  --src-path         /data/nfsshare \
-  --input-file       files-to-archive.txt \
-  --dst-bucket       your-own-dest-bucket \
-  --dst-prefix       20260804 \
-  --max-files        1000 \
-  --region           ap-northeast-2 \
-  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>
+  --max-files 1000          # replaces --max-size
 ```
 
-This is useful when the file set comes from an external source (e.g. a database export, a `find` result, or a change-list) rather than a full directory scan.
+**Archive an explicit list of files** — from a DB export, a `find` result, or a change-list, instead of walking the tree:
+
+```bash
+  --input-file files-to-archive.txt --max-files 1000
+```
+
+One absolute path per line (blank lines and `#` comments skipped). Missing paths, symlinks, and non-regular files are skipped and logged, but don't stop the run. `--src-path` is still required — it's the base for each tar member's relative path (stored relative to `--src-path` when the file lies under it, else the full path with the leading `/` dropped).
+
+**Fastest archive — skip MD5** — leaves the `md5` column null; slightly less CPU:
+
+```bash
+  --no-md5                  # replaces --md5
+```
+
+**Cold, write-once data — compress:**
+
+```bash
+  --compress --tar-storageclass DEEP_ARCHIVE
+```
+
+⚠️ `--compress` disables byte-range individual restore (offsets recorded as `-1`), and `DEEP_ARCHIVE` requires a whole-tar restore before any read — pair them only for archives you don't expect to read back file-by-file. See [Limitations](#limitations-and-notes).
+
+Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-individual-file-via-byte-range-get) (LOOKUP by path, or DIRECT by known offsets).
 
 ### Key parameters
 

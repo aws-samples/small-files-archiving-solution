@@ -80,6 +80,10 @@ s3tables:PutTableData, GetTableData
 
 ## 3. 실행 방법
 
+모든 실행은 **파일 소스**(`--src-path` 순회 또는 `--input-file` 목록)와 **배치 기준**(`--max-size` 또는 `--max-files`)의 조합입니다. 아래 시나리오는 대상/S3 Tables 관련 플래그를 공유하며, 소스와 배치 선택만 달라집니다.
+
+**기본 — 디렉터리를 균일 크기 tar로 번들링 (가장 일반적):**
+
 ```bash
 python fss3-archiver-s3tables-mp.py \
   --src-path         /data/nfsshare \
@@ -96,22 +100,37 @@ python fss3-archiver-s3tables-mp.py \
   --tar-storageclass GLACIER_IR
 ```
 
-#### 파일 목록으로 아카이빙 (`--input-file`)
+나머지 시나리오는 위 기본 명령에서 **아래 플래그만 바꾼 것**입니다:
 
-`--src-path`를 순회하는 대신, 아카이빙할 파일을 나열한 텍스트 파일을 넘길 수 있습니다 — 한 줄에 절대 경로 하나(빈 줄과 `#` 주석은 건너뜀). 존재하지 않는 파일은 로그에 남기고 실패로 집계하되 실행을 멈추지는 않습니다. `--src-path`는 여전히 필수입니다 — 각 tar 멤버의 상대 경로를 계산하는 기준으로 쓰이며, 경로가 `--src-path` 하위에 있으면 그 기준의 상대 경로로, 아니면 전체 경로로 저장됩니다.
+**tar당 파일 개수 고정** — 크기 대신 tar당 N개로 제한:
 
 ```bash
-python fss3-archiver-s3tables-mp.py \
-  --src-path         /data/nfsshare \
-  --input-file       files-to-archive.txt \
-  --dst-bucket       your-own-dest-bucket \
-  --dst-prefix       20260804 \
-  --max-files        1000 \
-  --region           ap-northeast-2 \
-  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>
+  --max-files 1000          # --max-size 대체
 ```
 
-전체 디렉터리 스캔이 아니라 외부 소스(예: 데이터베이스 export, `find` 결과, 변경 목록)에서 파일 집합이 오는 경우에 유용합니다.
+**지정한 파일 목록 아카이빙** — 트리를 순회하지 않고, DB export·`find` 결과·변경 목록에서 온 파일 집합을 처리:
+
+```bash
+  --input-file files-to-archive.txt --max-files 1000
+```
+
+한 줄에 절대 경로 하나(빈 줄·`#` 주석은 건너뜀). 존재하지 않는 경로, 심볼릭 링크, 일반 파일이 아닌 항목은 건너뛰고 로그에 남기되 실행을 멈추지 않습니다. `--src-path`는 여전히 필수 — 각 tar 멤버의 상대 경로 기준이며, 파일이 `--src-path` 하위에 있으면 그 기준 상대 경로로, 아니면 앞의 `/`를 뗀 전체 경로로 저장됩니다.
+
+**최고 속도 — MD5 생략** — `md5` 컬럼이 null이 되고 CPU를 약간 덜 씀:
+
+```bash
+  --no-md5                  # --md5 대체
+```
+
+**콜드·write-once 데이터 — 압축:**
+
+```bash
+  --compress --tar-storageclass DEEP_ARCHIVE
+```
+
+⚠️ `--compress`는 byte-range 개별 복원을 비활성화하며(offset이 `-1`로 기록됨), `DEEP_ARCHIVE`는 읽기 전에 tar 전체 restore가 필요합니다 — 파일 단위로 다시 읽지 않을 아카이브에만 함께 쓰세요. [제약 사항](#제약-및-주의사항) 참고.
+
+파일 하나를 다시 꺼내는 방법은 [§4.2](#42-복구--byte-range-get으로-개별-파일-추출)에서 다룹니다(경로로 LOOKUP, 또는 알려진 offset으로 DIRECT).
 
 ### 주요 파라미터
 
