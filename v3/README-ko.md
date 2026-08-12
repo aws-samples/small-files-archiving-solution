@@ -24,7 +24,7 @@
 ### 아키텍처
 
 ```
-파일 스캐너
+파일 소스 (--src-path 디렉터리 순회, 또는 --input-file 목록 파일)
    └─ 파일 목록을 용량(--max-size) 또는 개수(--max-files) 기준으로 배치 분할
         └─ ProcessPoolExecutor (N개 워커 프로세스)
               │  각 워커: tar 생성 (옵션 MD5) + S3 multipart 업로드
@@ -87,11 +87,29 @@ python fss3-archiver-s3tables-mp.py \
   --tar-storageclass GLACIER_IR
 ```
 
+#### 파일 목록으로 아카이빙 (`--input-file`)
+
+`--src-path`를 순회하는 대신, 아카이빙할 파일을 나열한 텍스트 파일을 넘길 수 있습니다 — 한 줄에 절대 경로 하나(빈 줄과 `#` 주석은 건너뜀). 존재하지 않는 파일은 로그에 남기고 실패로 집계하되 실행을 멈추지는 않습니다. `--src-path`는 여전히 필수입니다 — 각 tar 멤버의 상대 경로를 계산하는 기준으로 쓰이며, 경로가 `--src-path` 하위에 있으면 그 기준의 상대 경로로, 아니면 전체 경로로 저장됩니다.
+
+```bash
+python fss3-archiver-s3tables-mp.py \
+  --src-path         /data/nfsshare \
+  --input-file       files-to-archive.txt \
+  --dst-bucket       your-own-dest-bucket \
+  --dst-prefix       20260804 \
+  --max-files        1000 \
+  --region           ap-northeast-2 \
+  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>
+```
+
+전체 디렉터리 스캔이 아니라 외부 소스(예: 데이터베이스 export, `find` 결과, 변경 목록)에서 파일 집합이 오는 경우에 유용합니다.
+
 ### 주요 파라미터
 
 | 파라미터 | 설명 | 기본값 |
 |---|---|---|
-| `--src-path` | 아카이빙할 소스 디렉터리 (하위 재귀) | (필수) |
+| `--src-path` | 아카이빙할 소스 디렉터리 (하위 재귀); `--input-file` 사용 시엔 각 파일의 상대 경로 계산 기준 | (필수) |
+| `--input-file` | `--src-path` 순회 대신 아카이빙할 파일을 나열한 텍스트 파일 (한 줄에 경로 하나; `#` 주석·빈 줄 무시) | off (순회) |
 | `--dst-bucket` / `--dst-prefix` | tar 저장 S3 버킷 / prefix | (필수) |
 | `--max-size` **또는** `--max-files` | tar 1개당 크기(예 `512MB`) 또는 파일 개수 (택1) | (필수) |
 | `--num-workers` | tar 생성·전송 워커 프로세스 수 | `os.cpu_count()` |

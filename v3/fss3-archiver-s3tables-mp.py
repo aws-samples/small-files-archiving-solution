@@ -32,6 +32,7 @@ Requires: pip install "pyiceberg[pyarrow]" boto3   (Python 3.9+)
 """
 import os
 import io
+import stat
 import time
 import queue
 import hashlib
@@ -296,6 +297,7 @@ class FS2S3ArchiverMP:
         self.dst_prefix = args.dst_prefix.rstrip("/")
         self.max_files = args.max_files
         self.max_size = args.max_size
+        self.input_file = args.input_file
         self.num_workers = args.num_workers
         self.compress = args.compress
         self.do_md5 = args.md5
@@ -346,25 +348,83 @@ class FS2S3ArchiverMP:
                 return f"{size:.2f}{u}"
             size /= 1024
 
-    def _scan_batches(self):
-        """Yield batches of (full, rel, size) by size or count."""
-        batch, bsize = [], 0
+    def _regular_size(self, path):
+        """Return the size of `path` if it is a regular file, else None.
+
+        Uses a single lstat (no symlink follow). Symlinks are skipped rather
+        than archived: tarfile would store a 0-byte symlink member while the
+        manifest recorded the *target's* size, producing an empty file that
+        fails byte-range restore/MD5. Missing paths and non-regular files
+        (dir, fifo, device, socket) are also skipped. Every skip is logged and
+        counted as a failure; callers just check for None."""
+        try:
+            st = os.lstat(path)
+        except OSError as e:
+            self.logger.warning(f"stat failed, skipping {path}: {e}")
+            self._update(failed=1)
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            self.logger.warning(f"symlink skipped (not archived): {path}")
+            self._update(failed=1)
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            self.logger.warning(f"not a regular file, skipping: {path}")
+            self._update(failed=1)
+            return None
+        return st.st_size
+
+    def _rel_to_src(self, path):
+        """Path relative to --src-path when `path` lies under it (matching the
+        directory-walk layout), else the path with any leading separators
+        stripped. The prefix test is component-aware — a plain str.startswith
+        would turn src=/data/nfs, /data/nfsshare/x into 'share/x'."""
+        src = self.src.rstrip(os.sep) if self.src else ""
+        if src and (path == src or path.startswith(src + os.sep)):
+            return os.path.relpath(path, src)
+        return path.lstrip(os.sep)
+
+    def _iter_walk(self):
+        """Yield (full, rel, size) by recursively walking --src-path."""
         for root, _, files in os.walk(self.src):
             for name in files:
                 full = os.path.join(root, name)
-                try:
-                    sz = os.path.getsize(full)
-                except OSError as e:
-                    self.logger.error(f"stat failed {full}: {e}")
-                    self._update(failed=1)
+                sz = self._regular_size(full)
+                if sz is None:
                     continue
                 rel = os.path.relpath(full, self.src)
-                batch.append((full, rel, sz))
-                bsize += sz
-                if (self.max_files and len(batch) >= self.max_files) or \
-                   (self.max_size and bsize >= self.max_size):
-                    yield batch
-                    batch, bsize = [], 0
+                yield full, rel, sz
+
+    def _iter_input_file(self):
+        """Yield (full, rel, size) from an explicit list file (one path per line).
+
+        Blank lines and lines starting with '#' are skipped. Paths that don't
+        resolve to a regular file are logged and counted as failures (see
+        _regular_size). The rel path is derived relative to --src-path when the
+        file lies under it, so tar member names match the directory-walk layout."""
+        with open(self.input_file, "r", encoding="utf-8") as f:
+            for line in f:
+                path = line.strip()
+                if not path or path.startswith("#"):
+                    continue
+                sz = self._regular_size(path)
+                if sz is None:
+                    continue
+                yield path, self._rel_to_src(path), sz
+
+    def _scan_batches(self):
+        """Yield batches of (full, rel, size) by size or count.
+
+        Files come from --input-file when provided, otherwise from walking
+        --src-path."""
+        source = self._iter_input_file() if self.input_file else self._iter_walk()
+        batch, bsize = [], 0
+        for full, rel, sz in source:
+            batch.append((full, rel, sz))
+            bsize += sz
+            if (self.max_files and len(batch) >= self.max_files) or \
+               (self.max_size and bsize >= self.max_size):
+                yield batch
+                batch, bsize = [], 0
         if batch:
             yield batch
 
@@ -453,7 +513,13 @@ class FS2S3ArchiverMP:
 
 def main():
     p = argparse.ArgumentParser(description="Filesystem -> S3 archiver (multiprocess, S3 Tables manifest)")
-    p.add_argument("--src-path", required=True)
+    p.add_argument("--src-path", required=True,
+                   help="Source directory to walk. Also used to derive tar "
+                        "member paths (rel to this) when --input-file is given")
+    p.add_argument("--input-file",
+                   help="Path to a file listing source files to archive (one "
+                        "per line; blank lines and '#' comments skipped). When "
+                        "set, --src-path is not walked")
     p.add_argument("--dst-bucket", required=True)
     p.add_argument("--dst-prefix", required=True)
     grp = p.add_mutually_exclusive_group(required=True)
