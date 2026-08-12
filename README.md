@@ -82,6 +82,8 @@ s3tables:PutTableData, GetTableData
 
 Every run combines a **file source** (walk `--src-path`, or an explicit `--input-file` list) with a **batching rule** (`--max-size` or `--max-files`). The scenarios below all share the same destination/S3 Tables flags — only the source and batching choices change.
 
+> 💡 [`v3/run.sh`](v3/run.sh) packages every scenario below (plus restore) as ready-to-run bash functions — edit the shared vars at the top, uncomment one call, and run `bash run.sh`.
+
 **Baseline — bundle a directory into uniform-size tars (the common case):**
 
 ```bash

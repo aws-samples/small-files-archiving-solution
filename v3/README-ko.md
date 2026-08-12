@@ -82,6 +82,8 @@ s3tables:PutTableData, GetTableData
 
 모든 실행은 **파일 소스**(`--src-path` 순회 또는 `--input-file` 목록)와 **배치 기준**(`--max-size` 또는 `--max-files`)의 조합입니다. 아래 시나리오는 대상/S3 Tables 관련 플래그를 공유하며, 소스와 배치 선택만 달라집니다.
 
+> 💡 [`run.sh`](run.sh)에 아래 모든 시나리오(+복원)를 바로 실행 가능한 bash 함수로 담아 뒀습니다 — 상단 공용 변수를 수정하고, 함수 호출 한 줄의 주석을 해제한 뒤 `bash run.sh`로 실행하세요.
+
 **기본 — 디렉터리를 균일 크기 tar로 번들링 (가장 일반적):**
 
 ```bash
