@@ -529,8 +529,9 @@ def main():
                    help=f"worker processes (default: os.cpu_count()={os.cpu_count()})")
     p.add_argument("--upload-concurrency", type=int, default=10,
                    help="multipart upload threads per worker (default 10)")
-    p.add_argument("--md5", action=argparse.BooleanOptionalAction, default=False,
-                   help="compute per-file MD5 (--md5 / --no-md5). Off = faster, md5 column null")
+    p.add_argument("--md5", action=argparse.BooleanOptionalAction, default=True,
+                   help="compute per-file MD5 for integrity verification (on by "
+                        "default; --no-md5 disables it and leaves the md5 column null)")
     p.add_argument("--compress", action="store_true",
                    help="gzip the tar (disables byte-range retrieval offsets)")
     p.add_argument("--spool-max-mb", type=int, default=256)
