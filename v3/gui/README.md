@@ -4,9 +4,12 @@ Small Files Archiver bundles millions of small files into large tar objects in A
 
 This guide walks through the desktop app in the order you'll use it: **setup → archive → browse → restore**, then incremental runs, file-list reports and retrying failures.
 
-![Main window: local disk on the left, the archive's original files on the right, jobs at the bottom](docs/images/21-browse-files.png)
+<p align="center">
+  <a href="docs/demo.mp4"><img src="docs/demo-preview.gif" width="860" alt="Demo: setup wizard, archiving 523,124 files, browsing, restore and an incremental run"></a><br>
+  <b>▶ Click the preview for the full 2-minute demo video (MP4, 2.6 MB)</b>
+</p>
 
-> These screenshots were taken in a test environment with demo data. Your bucket names and paths will differ.
+> These screenshots and the video were taken in a test environment with demo data. Your bucket names and paths will differ.
 
 ## Contents
 
@@ -88,6 +91,7 @@ Nothing is created until you click **Finish**. The wizard then creates each reso
 | **Local disk** (left) | Your filesystem. Double-click to open a folder, ↑ to go up, or type a path. Select one or more files or folders to archive. Columns resize like the archive pane's (drag, double-click to fit, right-click to reset). |
 | **Archive →** / **← Restore** (middle) | Archive the left selection to S3, or restore the right selection into the current local folder. |
 | **Archive (S3)** (right) | The archive. **View: Files (untarred)** shows your original files and folders. **Tar objects** shows the tar files in the bucket. |
+| **Archive:** dropdown (right) | The last 10 archives you connected to (tar bucket, table bucket, table, Region). Pick one to switch; the pane reconnects and opens its root. |
 | Header line (right) | Profile, Region, tar bucket, table bucket and table. It never shows account IDs or user names. |
 | **Monitoring** / **Log** (bottom) | Every archive and restore job with progress, rate and ETA. The Log tab shows the detailed log. |
 | Status bar | All running jobs at a glance: how many tars are bundling or uploading, the total rate, and overall progress. |
@@ -104,9 +108,11 @@ Nothing is created until you click **Finish**. The wizard then creates each reso
 |---|---|
 | **Source** | The items selected in the left pane, or a [file-list report](#8-archive-from-a-file-list-report). |
 | **Store paths relative to** | Archived paths are stored relative to this folder. The default keeps the selected folder's own name, so `projects/…` appears in the archive. **Keep it the same across runs.** |
-| **Destination prefix** | Tars are written to `s3://<tar bucket>/<prefix>/<date>/archive_….tar`. |
+| **Destination prefix** | Where the tars go: `s3://<tar bucket>/<prefix>/…`. |
+| **Tar folders** | **One folder per run** (default): `<prefix>/<run-id>/`. Each run, including every incremental run, stays together, so you can check or clean it up as a unit. **One folder per day** (`<prefix>/<YYYYMMDD>/`) and **No subfolder** are also available. Restore works the same with any layout. |
 | **Incremental** | Only files changed since the last successful run of this source. See [§7](#7-incremental-archiving). |
 | **Bundling** | Close a tar at a size (for example 256 MB) or at a file count. |
+| **Upload part size** | 8, 16, 32 (default) or 64 MB. Every multipart part is a billed request; the dialog shows how many requests one tar needs. Larger parts mean fewer requests but more memory. See the main README §5.3 for the cost impact. |
 | **Worker processes / scan threads** | Parallel tar builders and uploaders, and parallel file scanners. Raise scan threads for NFS/SMB mounts or large reports. |
 | **Tar storage class** | `STANDARD` by default. `GLACIER_IR` is much cheaper and still allows single-file restore. `GLACIER` / `DEEP_ARCHIVE` need an S3 restore before reading. |
 | **Per-file MD5** | Stores each file's MD5 so restores are verified. Keep it on. |
@@ -146,9 +152,9 @@ Inside a folder, every file shows its size, archive time, **the tar that holds i
 
 ### Tar objects view: the tars in S3
 
-Click **Tar objects** to see the actual tar files in the bucket, with size, storage class and last-modified time.
+Click **Tar objects** to see the actual tar files in the bucket, with size, storage class and last-modified time. With the default layout there is one folder per run under the destination prefix, named after the run (its date and time come first).
 
-The view keeps your place. Switching from a folder opens the S3 prefix where that folder's tars are and **selects the tars that hold its files**. Switching back returns to the same folder.
+The view keeps your place. Switching from a folder opens the S3 prefix where that folder's tars are and **selects the tars that hold its files**. If the folder's files are spread over several runs (a full run plus incremental runs), it opens the destination prefix and selects **those run folders** instead. Switching back returns to the same folder.
 
 ![Tar objects view with the tars of the current folder selected](docs/images/23-tar-objects.png)
 
@@ -168,6 +174,9 @@ Double-click a tar to list the files inside it, in on-disk order, with byte rang
   - A folder keeps its own name under the destination, so `reports/q1/…` comes back as `reports/q1/…`.
   - A file lands directly in the destination.
   - A whole tar restores its files at their archived paths.
+- **Version:**
+  - **Newest archived copy of every file** (default). For folders this picks the newest copy of each file across all runs.
+  - **As of a past run** or **As of a date and time:** see [restore an earlier version](#restore-an-earlier-version).
 - **Overwrite existing files:** otherwise existing files are skipped, so a restore can be safely re-run.
 - **Verify MD5:** each file is checked against the manifest before it's written.
 
@@ -189,6 +198,18 @@ Tick **Incremental** to archive only files that changed since the **last success
 In this example, 13 changed files were archived and 2,629 unchanged files were skipped:
 
 ![Incremental run: 13 archived, 2,629 unchanged](docs/images/41-incremental-done.png)
+
+Each incremental run gets its own run folder and holds only the files that changed. The Files view still shows one merged tree with the newest copy of every file, marked `[2×]` when there is more than one.
+
+> ⚠️ **Don't delete an older run folder to save space.** Files that haven't changed since that run exist only in its tars. Deleting run folders is safe only for failed or cancelled runs.
+
+### Restore an earlier version
+
+Because every run is kept, you can bring files back **as they were at a past run**, for example from before an unwanted change was archived. In the Restore dialog, choose **As of a past run** and pick the run, or **As of a date and time**:
+
+![Restore as of a past run](docs/images/42-restore-as-of.png)
+
+Each file comes back as its newest copy archived up to that point, and files first archived later are left out. The archive is append-only, so files that were deleted from the source before that point are still included. Selecting whole tar objects, or files inside an opened tar, always restores those exact copies, so no version choice is offered.
 
 ## 8. Archive from a file-list report
 

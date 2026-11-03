@@ -117,6 +117,35 @@ class Listing:
     elapsed: float = 0.0
 
 
+_TAR_NAME_RE = re.compile(r"^archive_(.+)_\d{5}\.tar(?:\.gz)?$")
+
+
+def newest_per_key(tbl):
+    """Keep the newest row (max archive_ts) per source_key. Arrow-native, so it
+    stays fast and compact for large folders."""
+    if tbl is None or tbl.num_rows <= 1:
+        return tbl
+    t = tbl.take(pc.sort_indices(tbl, [("source_key", "ascending"),
+                                       ("archive_ts", "descending")]))
+    keys = t.column("source_key").combine_chunks()
+    prev = pa.concat_arrays([pa.array([None], type=keys.type), keys.slice(0, len(keys) - 1)])
+    keep = pc.invert(pc.fill_null(pc.equal(keys, prev), False))
+    return t.filter(keep)
+
+
+def parse_size(text):
+    """'256MB' / '1GB' / '4096' -> bytes (binary units, like the archiver)."""
+    t = str(text).strip().upper().replace(" ", "")
+    units = {"TB": 1024 ** 4, "GB": 1024 ** 3, "MB": 1024 ** 2, "KB": 1024, "T": 1024 ** 4,
+             "G": 1024 ** 3, "M": 1024 ** 2, "K": 1024, "B": 1}
+    for u, m in units.items():
+        if t.endswith(u) and t[:-len(u)].replace(".", "", 1).isdigit():
+            return int(float(t[:-len(u)]) * m)
+    if t.isdigit():
+        return int(t)
+    raise ValueError(f"bad size {text!r}")
+
+
 def human(n):
     if n is None:
         return ""
@@ -322,6 +351,20 @@ class Manifest:
                                          "status", "mode")).to_arrow().to_pylist()
         return max(rows, key=lambda r: r["start_ts"]) if rows else None
 
+    def list_runs(self, limit=500):
+        """Completed runs (ok/partial), newest first, for 'restore as of run'."""
+        from pyiceberg.expressions import In
+        try:
+            tbl = self._table("_runs")
+        except Exception:
+            return []
+        rows = tbl.scan(row_filter=In("status", ["ok", "partial"]),
+                        selected_fields=("run_id", "mode", "status", "start_ts", "end_ts",
+                                         "files", "bytes", "src_path", "walk_paths",
+                                         "input_file", "dst_prefix")).to_arrow().to_pylist()
+        rows.sort(key=lambda r: r["end_ts"], reverse=True)
+        return rows[:limit]
+
     # -- linking the two views ----------------------------------------------
     @staticmethod
     def _common_dir(paths):
@@ -360,10 +403,20 @@ class Manifest:
 
     @staticmethod
     def dst_prefix_of(tar_key):
-        """The archiver writes <dst-prefix>/<YYYYMMDD>/archive_<run>_<n>.tar, so
-        the destination prefix is the key minus its last two parts."""
+        """Destination prefix of a tar key, for any --tar-layout:
+             run   <prefix>/<run-id>/archive_<run-id>_00001.tar
+             date  <prefix>/<YYYYMMDD>/archive_<run-id>_00001.tar
+             flat  <prefix>/archive_<run-id>_00001.tar
+        The run id is read back from the file name; the folder above the file
+        is a layout level only when it is that run id or an 8-digit date."""
         parts = tar_key.strip("/").split("/")
-        return "/".join(parts[:-2]) if len(parts) >= 3 else "/".join(parts[:-1])
+        if len(parts) < 2:
+            return ""
+        m = _TAR_NAME_RE.match(parts[-1])
+        folder = parts[-2]
+        if len(parts) >= 3 and ((m and folder == m.group(1)) or re.fullmatch(r"\d{8}", folder)):
+            return "/".join(parts[:-2])
+        return "/".join(parts[:-1])
 
     def archive_location(self, sample=5000):
         """Where this archive's tars live: (s3_prefix_to_open, dst_prefixes).
@@ -413,18 +466,35 @@ class Manifest:
         return self._common_dir([posixpath.dirname(r) for r in rows])
 
     # -- restore source ----------------------------------------------------
-    def iter_batches(self, selections):
-        """Yield Arrow record batches of FILE_FIELDS for each selection.
+    DIR_CHUNK = 500        # folders per manifest query in an indexed folder restore
+
+    def iter_batches(self, selections, as_of=None):
+        """Yield (kind, path, Arrow batch of FILE_FIELDS) for each selection.
 
         selections: list of (kind, path):
-          'file'   path = source_key       newest archived copy of that path
-          'dir'    path = folder           every descendant (streamed)
-          'tar'    path = S3 key of a tar  every member of that tar (streamed)
+          'file'   path = source_key       newest copy of that path
+          'dir'    path = folder           newest copy of every file below it
+          'tar'    path = S3 key of a tar  every member of that tar
           'member' path = (tar_key, source_key)  that tar's copy specifically
-        Streaming kinds go through a batch reader, so memory is bounded by the
-        batch, not by the folder or tar size."""
-        from pyiceberg.expressions import EqualTo, StartsWith, In, And
+        as_of (datetime, optional): point-in-time restore -- 'newest' becomes
+        newest archived at or before as_of. It applies to 'file' and 'dir';
+        'tar' and 'member' already name one exact copy.
+
+        Folder restores pick the newest copy of every path, also across
+        incremental runs. With the directory index this is exact and bounded:
+        folders are read a chunk at a time (parent_dir IN chunk), and every copy
+        of a path shares its parent_dir, so de-duplicating within a chunk is
+        complete. Legacy tables (no index) fall back to a prefix stream that
+        de-duplicates within each batch only."""
+        from pyiceberg.expressions import EqualTo, StartsWith, In, And, LessThanOrEqual
         tbl = self._table()
+
+        def cut(expr):
+            if as_of is None:
+                return expr
+            le = LessThanOrEqual("archive_ts", as_of)
+            return le if expr is None else And(expr, le)
+
         for kind, path in selections:
             if kind == "tar":
                 for b in tbl.scan(row_filter=In("tar_key", self._tar_keys(path)),
@@ -440,19 +510,45 @@ class Manifest:
                     yield kind, path, b
                 continue
             if kind == "file":
-                arr = tbl.scan(row_filter=EqualTo("source_key", path),
+                arr = tbl.scan(row_filter=cut(EqualTo("source_key", path)),
                                selected_fields=FILE_FIELDS).to_arrow()
-                if arr.num_rows > 1:   # several versions: newest only
-                    idx = pc.sort_indices(arr, [("archive_ts", "descending")])
-                    arr = arr.take(idx[:1])
-                for b in arr.to_batches():
+                for b in newest_per_key(arr).to_batches():
                     yield kind, path, b
-            else:
-                kw = {"selected_fields": FILE_FIELDS}
-                if path:
-                    kw["row_filter"] = StartsWith("source_key", path + "/")
-                for b in tbl.scan(**kw).to_arrow_batch_reader():
+                continue
+            if self.has_index is None:
+                self.probe()
+            if self.has_index and not self.unindexed_rows:
+                for b in self._iter_dir_indexed(tbl, path, cut):
                     yield kind, path, b
+                continue
+            flt = cut(StartsWith("source_key", path + "/") if path else None)
+            kw = {"selected_fields": FILE_FIELDS}
+            if flt is not None:
+                kw["row_filter"] = flt
+            for b in tbl.scan(**kw).to_arrow_batch_reader():
+                if b.num_rows:
+                    for bb in newest_per_key(pa.Table.from_batches([b])).to_batches():
+                        yield kind, path, bb
+
+    def folders_under(self, path):
+        """Every folder at or below `path`, from the directory index."""
+        from pyiceberg.expressions import EqualTo, Or, StartsWith
+        dtbl = self._table("_dirs")
+        kw = {"selected_fields": ("dir_path",)}
+        if path:
+            kw["row_filter"] = Or(EqualTo("dir_path", path), StartsWith("dir_path", path + "/"))
+        dirs = set(dtbl.scan(**kw).to_arrow().column("dir_path").to_pylist())
+        dirs.add(path)          # '' = files directly at the root
+        return sorted(dirs)
+
+    def _iter_dir_indexed(self, tbl, path, cut):
+        from pyiceberg.expressions import In
+        dirs = self.folders_under(path)
+        for i in range(0, len(dirs), self.DIR_CHUNK):
+            arr = tbl.scan(row_filter=cut(In("parent_dir", dirs[i:i + self.DIR_CHUNK])),
+                           selected_fields=FILE_FIELDS).to_arrow()
+            for b in newest_per_key(arr).to_batches(max_chunksize=20_000):
+                yield b
 
     def count_under(self, selections, cached_dirs):
         """Cheap (files, bytes) estimate for a selection using listing data."""
@@ -781,8 +877,9 @@ class RestoreEngine:
             except Exception as e:
                 self._err(f"{row['source_key']}: {type(e).__name__}: {e}")
 
-    def run(self, manifest: Manifest, selections):
-        """Blocking. Streams rows, dispatches GETs with bounded parallelism."""
+    def run(self, manifest: Manifest, selections, as_of=None):
+        """Blocking. Streams rows, dispatches GETs with bounded parallelism.
+        as_of: restore the newest copies archived at or before this time."""
         pool = ThreadPoolExecutor(max_workers=self.concurrency,
                                   thread_name_prefix="restore")
         inflight = set()
@@ -801,7 +898,7 @@ class RestoreEngine:
             buf = []
 
         try:
-            for kind, sel, batch in manifest.iter_batches(selections):
+            for kind, sel, batch in manifest.iter_batches(selections, as_of=as_of):
                 if self.cancel.is_set():
                     break
                 # newest-last within a batch, so a re-archived path ends on its

@@ -295,7 +295,12 @@ def _process_batch(task):
         spool.close()
 
     total = sum(r["filesize"] for r in rows)
+    part = tconf.multipart_chunksize
+    # PUT-class requests for this tar: one PutObject, or Create + N x UploadPart
+    # + Complete for a multipart upload (boto3 goes multipart above the threshold)
+    nreq = 1 if tar_size <= tconf.multipart_threshold else -(-tar_size // part) + 2
     return {"tar_key": task["tar_key"], "rows": rows, "failed_files": failed_files,
+            "requests": nreq,
             "failed": failed, "total_bytes": total, "count": len(rows)}
 
 
@@ -625,6 +630,11 @@ class _BatchEmitter:
            (self._max_size and self._bytes >= self._max_size):
             self.flush()
 
+    def report_unchanged(self):
+        if self.unchanged and self._on_flush is not None:
+            self._on_flush(0, 0, self.unchanged)
+            self.unchanged = 0
+
     def flush(self):
         if not self._batch:
             if self.unchanged and self._on_flush is not None:
@@ -916,6 +926,11 @@ class FS2S3ArchiverMP:
         self.scan_threads = args.scan_threads
         self.current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.mid_prefix = self.current_time.split("_")[0]
+        self.tar_layout = getattr(args, "tar_layout", "run")
+        # multipart part size: also the threshold, so a tar no larger than one
+        # part goes up as a single PUT
+        self.part_size = parse_size(getattr(args, "part_size", "32MB") or "32MB")
+        self._requests = 0
 
         # Per-run token that makes tar keys unique across concurrent runs.
         # current_time alone is NOT enough: it has second granularity and is
@@ -976,6 +991,22 @@ class FS2S3ArchiverMP:
         self._inflight_tars = set()
         self._t0 = time.time()
         self.progress = None
+
+    def _tar_key(self, batch_no, ext):
+        """S3 key of one tar. The file name always carries the run id, so a tar
+        stays unique even when copied out of its folder; --tar-layout only
+        decides the folder level between the prefix and the file:
+          run   <prefix>/<run-id>/archive_<run-id>_00001.tar  (default) one
+                folder per run: a run is checked, reconciled or cleaned up as a
+                unit, and incremental runs never mix with earlier ones
+          date  <prefix>/<YYYYMMDD>/archive_<run-id>_00001.tar  (pre-v3.1)
+          flat  <prefix>/archive_<run-id>_00001.tar
+        Restore never depends on the layout: the manifest stores full keys."""
+        name = f"archive_{self.run_id}_{batch_no:05d}{ext}"
+        if self.tar_layout == "flat":
+            return f"{self.dst_prefix}/{name}"
+        folder = self.run_id if self.tar_layout == "run" else self.mid_prefix
+        return f"{self.dst_prefix}/{folder}/{name}"
 
     def _on_scan_flush(self, nfiles, nbytes, unchanged=0):
         with self._stats_lock:
@@ -1078,6 +1109,8 @@ class FS2S3ArchiverMP:
                     # changes that leave mtime old; mtime catches content writes
                     if wm is not None and max(st.st_mtime, st.st_ctime) < wm:
                         emitter.unchanged += 1
+                        if emitter.unchanged >= 2000:   # keep progress moving
+                            emitter.report_unchanged()
                         continue
                     emitter.add((entry.path, rel, st.st_size))
                 else:
@@ -1331,7 +1364,9 @@ class FS2S3ArchiverMP:
                         "src_path": os.path.abspath(self.src),
                         "walk_paths": json.dumps(self.walk_paths) if self.walk_paths else None,
                         "input_file": os.path.abspath(self.input_file) if self.input_file else None,
-                        "mode": "incremental" if self.incremental else "full",
+                        # an incremental run without a baseline archived everything
+                        "mode": "incremental" if (self.incremental and self.watermark_iso)
+                                else "full",
                         "status": status, "start_ts": start_dt,
                         "end_ts": datetime.now(timezone.utc),
                         "watermark_ts": (datetime.fromisoformat(self.watermark_iso)
@@ -1405,6 +1440,7 @@ class FS2S3ArchiverMP:
                     check_writer()
                     self.manifest_queue.put(r, timeout=60)
                 # count a tar only when one was actually uploaded (rows > 0)
+                self._requests += res.get("requests", 0)
                 self._update(files=res["count"], failed=res["failed"],
                              tars=1 if res["count"] else 0, nbytes=res["total_bytes"])
                 if res["count"]:
@@ -1443,7 +1479,7 @@ class FS2S3ArchiverMP:
                     initializer=_init_worker,
                     initargs=(self.args.profile_name, self.args.region,
                               self.args.tar_storageclass,
-                              16 * 1024 * 1024, 16 * 1024 * 1024,
+                              self.part_size, self.part_size,
                               self.args.upload_concurrency, progress_q)) as ex:
                 inflight = set()
                 batch_no = 0
@@ -1458,8 +1494,7 @@ class FS2S3ArchiverMP:
                     # run_id keeps this key unique across concurrent runs even
                     # when they share --dst-prefix; batch_no is assigned here in
                     # the main thread, so it stays gap-free and unique per run.
-                    tar_key = (f"{self.dst_prefix}/{self.mid_prefix}/"
-                               f"archive_{self.run_id}_{batch_no:05d}{ext}")
+                    tar_key = self._tar_key(batch_no, ext)
                     task = {"files": batch, "tar_key": tar_key,
                             "bucket": self.dst_bucket, "compress": self.compress,
                             "do_md5": self.do_md5, "spool_max": self.spool_max}
@@ -1529,6 +1564,8 @@ class FS2S3ArchiverMP:
         self.logger.info(f"Workers         : {self.num_workers} "
                          f"(scan threads {self.scan_threads})")
         self.logger.info(f"Bytes           : {self._human(self._bytes)}")
+        self.logger.info(f"Upload requests : {self._requests:,} PUT-class "
+                         f"(part size {self._human(self.part_size)})")
         self.logger.info(f"Avg rate        : {self._human(rate)}/s")
         self.logger.info("#" * 40)
 
@@ -1572,6 +1609,13 @@ def main():
                         "Override only if you need a reproducible name -- two live "
                         "runs sharing a --dst-prefix AND a --run-id will overwrite "
                         "each other's tars")
+    p.add_argument("--part-size", choices=["8MB", "16MB", "32MB", "64MB"], default="32MB",
+                   help="multipart upload part size, also the single-PUT threshold "
+                        "(default 32MB). Every part is a billed PUT-class request, so "
+                        "bigger parts mean fewer requests: a 256MB tar takes 34 requests "
+                        "at 8MB, 18 at 16MB, 10 at 32MB, 6 at 64MB. Bigger parts use more "
+                        "memory (about part size x --upload-concurrency per worker) and "
+                        "re-send more data when a part fails")
     p.add_argument("--upload-concurrency", type=int, default=10,
                    help="multipart upload threads per worker (default 10)")
     p.add_argument("--md5", action=argparse.BooleanOptionalAction, default=True,
@@ -1610,6 +1654,12 @@ def main():
                         "list one folder at a time at billion-file scale (on by "
                         "default; adds parent_dir to an existing table via "
                         "additive schema evolution)")
+    p.add_argument("--tar-layout", choices=["run", "date", "flat"], default="run",
+                   help="folder level for the tar objects under --dst-prefix: run "
+                        "(<prefix>/<run-id>/..., default: one folder per run), date "
+                        "(<prefix>/<YYYYMMDD>/..., the earlier layout) or flat "
+                        "(<prefix>/archive_*.tar). Existing archives keep working "
+                        "whatever you pick -- the manifest stores full tar keys")
     p.add_argument("--incremental", action="store_true",
                    help="archive only files whose mtime or ctime is newer than the "
                         "start of the last successful run of the same source "

@@ -301,6 +301,9 @@ class LocalPane(QWidget):
         path = os.path.abspath(os.path.expanduser(path or "/"))
         if not os.path.isdir(path):
             return
+        # a selection made in the previous folder must not follow us: it is no
+        # longer visible, and Archive / Restore would silently act on it
+        self.view.clearSelection()
         self.cwd = path
         self.view.setRootIndex(self.model.index(path))
         self.bar.set_path(path)
@@ -311,8 +314,10 @@ class LocalPane(QWidget):
             self.cd(p)
 
     def selected_paths(self):
+        """Selected items in the folder being shown (never stale ones)."""
         rows = {self.model.filePath(i) for i in self.view.selectionModel().selectedRows(0)}
-        return sorted(rows)
+        return sorted(p for p in rows if os.path.dirname(p.rstrip("/")) == self.cwd.rstrip("/")
+                      or (self.cwd == "/" and os.path.dirname(p) == "/"))
 
     def restore_target(self):
         """Selected single folder, else the current folder."""
@@ -470,6 +475,15 @@ class ArchivePane(QWidget):
         self.btn_refresh = QToolButton(); self.btn_refresh.setText("⟳"); self.btn_refresh.setToolTip("Refresh")
         self.bar.layout().addWidget(self.btn_refresh)
 
+        # recent archives: switch between tar bucket / table bucket / table sets
+        hr = QHBoxLayout(); hr.setContentsMargins(0, 0, 0, 0)
+        self.hist = QComboBox()
+        self.hist.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.hist.setMinimumContentsLength(16)
+        self.hist.setToolTip("Archives you have connected to. Pick one to switch to it.")
+        self.hist.activated.connect(self._switch_archive)
+        hr.addWidget(QLabel("Archive:")); hr.addWidget(self.hist, 1)
+
         # view switch
         sw = QHBoxLayout(); sw.setContentsMargins(0, 0, 0, 0)
         self.btn_files = QToolButton(); self.btn_files.setText("Files (untarred)")
@@ -523,13 +537,73 @@ class ArchivePane(QWidget):
         self.btn_more.setVisible(False)
         self.btn_more.clicked.connect(self._more)
         foot.addWidget(self.info, 1); foot.addWidget(self.btn_more)
-        v.addWidget(self.bar); v.addLayout(sw); v.addLayout(srow); v.addWidget(self.who)
+        v.addWidget(self.bar); v.addLayout(hr); v.addLayout(sw); v.addLayout(srow); v.addWidget(self.who)
         v.addWidget(self.view, 1); v.addLayout(foot)
         self.bar.navigate.connect(self._navigate_text)
         self.bar.up.connect(self._up)
         self.btn_refresh.clicked.connect(self.refresh)
         self.search.returnPressed.connect(self._search)
         self._update_chrome()
+        self._fill_history()
+        self.connect_backend()
+
+    # -- archive history ----------------------------------------------------
+    HIST_KEYS = ("profile", "region", "bucket", "table_bucket", "table_bucket_arn",
+                 "namespace", "table_name")
+    HIST_MAX = 10
+
+    def _history(self):
+        try:
+            h = json.loads(self.s.get("archive_history", "[]") or "[]")
+            return [e for e in h if isinstance(e, dict) and e.get("bucket")]
+        except ValueError:
+            return []
+
+    @staticmethod
+    def _hist_label(e):
+        return (f"s3://{e['bucket']}  ·  table bucket {e.get('table_bucket') or '?'}  ·  "
+                f"{e.get('namespace')}.{e.get('table_name')}  ·  {e.get('region')}"
+                + (f"  ·  {e['profile']}" if e.get("profile") else ""))
+
+    @staticmethod
+    def _same(a, b):
+        return all((a.get(k) or "") == (b.get(k) or "") for k in
+                   ("region", "bucket", "table_bucket", "namespace", "table_name", "profile"))
+
+    def _fill_history(self):
+        cur = {k: self.s.get(k, "") for k in self.HIST_KEYS}
+        cur["table_bucket"] = self.s.config().table_bucket
+        h = self._history()
+        if cur.get("bucket") and not any(self._same(e, cur) for e in h):
+            h.insert(0, cur)
+        self.hist.blockSignals(True)
+        self.hist.clear()
+        for e in h:
+            self.hist.addItem(mask(self._hist_label(e)))
+        idx = next((i for i, e in enumerate(h) if self._same(e, cur)), -1)
+        self.hist.setCurrentIndex(idx)
+        self.hist.blockSignals(False)
+        self._hist_entries = h
+
+    def _remember(self, cfg):
+        """Put the archive just connected to at the top of the history."""
+        e = {"profile": cfg.profile, "region": cfg.region, "bucket": cfg.bucket,
+             "table_bucket": cfg.table_bucket, "table_bucket_arn": cfg.table_bucket_arn,
+             "namespace": cfg.namespace, "table_name": cfg.table_name}
+        h = [x for x in self._history() if not self._same(x, e)]
+        h.insert(0, e)
+        self.s.set("archive_history", json.dumps(h[:self.HIST_MAX]))
+        self._fill_history()
+
+    def _switch_archive(self, index):
+        h = getattr(self, "_hist_entries", [])
+        if not (0 <= index < len(h)):
+            return
+        e = h[index]
+        for k in self.HIST_KEYS:
+            self.s.set(k, e.get(k, "") or "")
+        self.cwd, self.tar_prefix, self.tar_open = "", "", None
+        self.search.clear()
         self.connect_backend()
 
     # Initial widths per view, used until the user resizes a column. Name is
@@ -564,9 +638,12 @@ class ArchivePane(QWidget):
             self._applying_widths = False
 
     def _default_widths(self, mode):
+        """Name gets what's left after the fixed columns; the last column
+        stretches anyway, so it doesn't count -- otherwise the defaults overflow
+        the pane and add a needless horizontal scrollbar."""
         widths = list(self.DEFAULT_WIDTHS[mode])
-        rest = sum(w for w in widths[1:] if w)
-        widths[0] = max(220, self.view.viewport().width() - rest - 4)
+        fixed = sum(w for w in widths[1:-1] if w)
+        widths[0] = max(180, self.view.viewport().width() - fixed - 140)
         return widths
 
     def _refit_defaults(self, mode):
@@ -722,6 +799,7 @@ class ArchivePane(QWidget):
 
     # -- connection ----------------------------------------------------------
     def connect_backend(self, keep_path=False):
+        self._fill_history()
         cfg = self.s.config()
         target = self.cwd if keep_path else ""
         self.manifest = None
@@ -747,6 +825,7 @@ class ArchivePane(QWidget):
             m, tars, arn, has_index = res
             self.s.set("table_bucket_arn", arn)
             self.manifest, self.tars = m, tars
+            self._remember(cfg)
             mode = ("directory index" if has_index else
                     "legacy table (no dir index: folder view samples a bounded prefix scan)")
             if m.table_missing:
@@ -886,8 +965,13 @@ class ArchivePane(QWidget):
             if pending and not append:
                 want, folder, sampled = pending
                 sm = self.view.selectionModel()
+                # tars listed here, or -- when the files span several runs --
+                # the run folders that contain them
+                want_dirs = {posixpath.dirname(k) + "/" for k in want}
                 rows = [n for n, i in enumerate(self.model.items)
-                        if i["kind"] == "object" and i["key"] in want]
+                        if (i["kind"] == "object" and i["key"] in want) or
+                        (i["kind"] == "prefix" and any(d.startswith(i["path"]) for d in want_dirs))]
+                nfold = sum(1 for n in rows if self.model.items[n]["kind"] == "prefix")
                 for n in rows:
                     sm.select(self.model.index(n, 0),
                               QItemSelectionModel.SelectionFlag.Select
@@ -896,11 +980,13 @@ class ArchivePane(QWidget):
                     self.view.scrollTo(self.model.index(rows[0], 0))
                 link = getattr(self, "_link", None)
                 if link:
-                    link["auto"] = {self.model.items[n]["key"] for n in rows}
-                self._linked_note = (f"Selected {len(rows):,} tar(s) holding files of "
-                                     f"/{folder}" + (" (sampled)" if sampled else "")
+                    link["auto"] = {self.model.items[n].get("key") for n in rows}
+                what = (f"{nfold:,} run folder(s)" if nfold and nfold == len(rows) else
+                        f"{len(rows):,} tar(s)" if not nfold else f"{len(rows):,} items")
+                self._linked_note = (f"Selected {what} holding files of /{folder}"
+                                     + (" (sampled)" if sampled else "")
                                      + (f"; {len(want) - len(rows):,} more on later pages"
-                                        if len(want) > len(rows) else ""))
+                                        if not nfold and len(want) > len(rows) else ""))
             else:
                 self._linked_note = getattr(self, "_root_note", "") \
                     if self.tar_prefix == (getattr(self, "_link", None) or {}).get("prefix") else ""
@@ -1107,6 +1193,17 @@ class ArchiveDialog(QDialog):
         f.addRow("Store paths relative to", self.base)
         self.prefix = QLineEdit(self.s.get("last_prefix", "") or datetime.now().strftime("%Y%m%d"))
         f.addRow("Destination prefix", self.prefix)
+        self.layout_cb = QComboBox()
+        self.layout_cb.addItem("One folder per run  (<prefix>/<run-id>/)", "run")
+        self.layout_cb.addItem("One folder per day  (<prefix>/<YYYYMMDD>/)", "date")
+        self.layout_cb.addItem("No subfolder  (<prefix>/)", "flat")
+        i = self.layout_cb.findData(self.s.get("last_layout", "run") or "run")
+        self.layout_cb.setCurrentIndex(max(0, i))
+        self.layout_cb.setToolTip("Where the tar objects go under the destination prefix. "
+                                  "Per run keeps each run (including every incremental run) "
+                                  "together for checking and cleanup. Restore works the same "
+                                  "for any layout.")
+        f.addRow("Tar folders", self.layout_cb)
         self.dest_lbl = QLabel()
         f.addRow("", self.dest_lbl)
 
@@ -1128,6 +1225,17 @@ class ArchiveDialog(QDialog):
         g.addWidget(self.by_size); g.addWidget(self.size); g.addSpacing(16)
         g.addWidget(self.by_count); g.addWidget(self.count)
         f.addRow("Bundling", g)
+
+        self.part = QComboBox()
+        self.part.addItems(["8MB", "16MB", "32MB", "64MB"])
+        self.part.setCurrentText(self.s.get("last_part", "32MB") or "32MB")
+        self.part.setToolTip("Multipart upload part size. Every part is a billed PUT-class "
+                             "request, so bigger parts mean fewer requests. Bigger parts use "
+                             "more memory (about part size × 10 upload threads per worker) and "
+                             "re-send more data if a part fails.")
+        self.part_lbl = QLabel(""); self.part_lbl.setStyleSheet("color: gray")
+        hp = QHBoxLayout(); hp.addWidget(self.part); hp.addWidget(self.part_lbl, 1)
+        f.addRow("Upload part size", hp)
 
         self.workers = QSpinBox(); self.workers.setRange(1, 512); self.workers.setValue(os.cpu_count() or 4)
         self.scan = QSpinBox(); self.scan.setRange(1, 256); self.scan.setValue(1)
@@ -1165,6 +1273,8 @@ class ArchiveDialog(QDialog):
                   self.src_sel, self.src_rep, self.incr):
             w.toggled.connect(self._refresh)
         self.sclass.currentTextChanged.connect(self._refresh)
+        self.layout_cb.currentIndexChanged.connect(self._refresh)
+        self.part.currentTextChanged.connect(self._refresh)
         self.base.editingFinished.connect(self._lookup_last_run)
         self.src_sel.toggled.connect(self._lookup_last_run)
         self._refresh()
@@ -1260,7 +1370,9 @@ class ArchiveDialog(QDialog):
                     "--input-format", self.rfmt.currentText()]
             if self.rfmt.currentText() != "lines":
                 cmd += ["--path-column", self.rcol.text().strip()]
-        cmd += ["--dst-bucket", cfg.bucket, "--dst-prefix", self.prefix.text().strip().strip("/")]
+        cmd += ["--dst-bucket", cfg.bucket, "--dst-prefix", self.prefix.text().strip().strip("/"),
+                "--tar-layout", self.layout_cb.currentData(),
+                "--part-size", self.part.currentText()]
         if self.by_size.isChecked():
             cmd += ["--max-size", self.size.currentText().strip()]
         else:
@@ -1287,7 +1399,10 @@ class ArchiveDialog(QDialog):
         if rep and self.incr.isChecked():
             self.incr.setChecked(False)
         self.incr_lbl.setVisible(not rep)
-        self.dest_lbl.setText(f"→ s3://{cfg.bucket}/{self.prefix.text().strip().strip('/')}/<date>/archive_*.tar")
+        self.part_lbl.setText(self._requests_hint())
+        folder = {"run": "<run-id>/", "date": "<YYYYMMDD>/", "flat": ""}[self.layout_cb.currentData()]
+        self.dest_lbl.setText(f"→ s3://{cfg.bucket}/{self.prefix.text().strip().strip('/')}/"
+                              f"{folder}archive_<run-id>_00001.tar …")
         cmd, err = self.command()
         self.btn_run.setEnabled(err is None)
         if err:
@@ -1298,6 +1413,19 @@ class ArchiveDialog(QDialog):
                      for c in cmd[1:]]
             self.preview.setPlainText(mask(" ".join(shlex.quote(c) for c in shown)))
 
+    def _requests_hint(self):
+        """'≈ N upload requests per tar' for the chosen tar size and part size."""
+        part = int(self.part.currentText()[:-2]) * 1024 * 1024
+        if not self.by_size.isChecked():
+            return "requests per tar depend on the tar size (bundling by file count)"
+        try:
+            size = backend.parse_size(self.size.currentText())
+        except ValueError:
+            return ""
+        n = 1 if size <= part else -(-size // part) + 2
+        return (f"≈ {n} upload request{'s' if n > 1 else ''} per {human(size)} tar"
+                + ("" if n == 1 else f" (start + {n - 2} parts + finish)"))
+
     def _accept(self):
         if self.compress.isChecked() and QMessageBox.question(
                 self, "Compression",
@@ -1307,6 +1435,8 @@ class ArchiveDialog(QDialog):
         self.s.set("last_prefix", self.prefix.text().strip())
         self.s.set("last_size", self.size.currentText())
         self.s.set("last_sclass", self.sclass.currentText())
+        self.s.set("last_layout", self.layout_cb.currentData())
+        self.s.set("last_part", self.part.currentText())
         self.accept()
 
     def title(self):
@@ -1317,9 +1447,10 @@ class ArchiveDialog(QDialog):
 
 
 class RestoreDialog(QDialog):
-    def __init__(self, selections, files, nbytes, dest, parent=None):
+    def __init__(self, selections, files, nbytes, dest, parent=None, manifest=None):
         super().__init__(parent)
         self.setWindowTitle("Restore to local disk")
+        self.manifest = manifest
         f = QFormLayout(self)
         names = [selection_label(k, p) for k, p in selections[:8]]
         if len(selections) > 8:
@@ -1333,6 +1464,40 @@ class RestoreDialog(QDialog):
         btn.clicked.connect(self._pick)
         h = QHBoxLayout(); h.addWidget(self.dest, 1); h.addWidget(btn)
         f.addRow("Destination", h)
+        # -- which version: newest, or as the archive was at a past run / time
+        from PySide6.QtWidgets import QDateTimeEdit
+        from PySide6.QtCore import QDateTime
+        self.v_new = QRadioButton("Newest archived copy of every file")
+        self.v_run = QRadioButton("As of a past run")
+        self.v_time = QRadioButton("As of a date and time")
+        vg = QButtonGroup(self)
+        for b in (self.v_new, self.v_run, self.v_time):
+            vg.addButton(b)
+        self.v_new.setChecked(True)
+        self.runs = QComboBox(); self.runs.setMinimumWidth(420)
+        self.runs.addItem("Loading run history…")
+        self.when = QDateTimeEdit(QDateTime.currentDateTime())
+        self.when.setCalendarPopup(True)
+        self.when.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        f.addRow("Version", self.v_new)
+        f.addRow("", self.v_run); f.addRow("", self.runs)
+        f.addRow("", self.v_time); f.addRow("", self.when)
+        self.v_note = QLabel(""); self.v_note.setWordWrap(True)
+        self.v_note.setStyleSheet("color: gray")
+        f.addRow("", self.v_note)
+        only_exact = all(k in ("tar", "member") for k, _ in selections)
+        for w in (self.v_run, self.v_time):
+            w.setEnabled(not only_exact)
+        for w in (self.v_new, self.v_run, self.v_time):
+            w.toggled.connect(self._sync_version)
+        if only_exact:
+            self.v_note.setText("Tar objects and files picked inside a tar are restored "
+                                "exactly as stored, so there is no version to choose.")
+        self._sync_version()
+        self._run_rows = []
+        if manifest is not None and not only_exact:
+            run_async(self, manifest.list_runs, self._fill_runs,
+                      lambda m: (self.runs.clear(), self.runs.addItem("Run history unavailable")))
         self.overwrite = QCheckBox("Overwrite existing files (otherwise skip)")
         self.verify = QCheckBox("Verify MD5"); self.verify.setChecked(True)
         f.addRow("", self.overwrite); f.addRow("", self.verify)
@@ -1349,6 +1514,56 @@ class RestoreDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, "Restore into", self.dest.text())
         if d:
             self.dest.setText(d)
+
+    @staticmethod
+    def _run_label(r):
+        src = posixpath.basename((r.get("src_path") or "").rstrip("/")) or "/"
+        if r.get("walk_paths"):
+            try:
+                walks = [posixpath.basename(w.rstrip("/")) for w in json.loads(r["walk_paths"])]
+                src = ", ".join(walks[:3]) + (" …" if len(walks) > 3 else "")
+            except ValueError:
+                pass
+        elif r.get("input_file"):
+            src = "report " + posixpath.basename(r["input_file"])
+        return mask(f"{fmt_ts(r['end_ts'])}  ·  {r['mode']}  ·  {r['files']:,} files  ·  {src}"
+                    + ("" if r["status"] == "ok" else "  (partial)"))
+
+    def _fill_runs(self, rows):
+        self._run_rows = rows
+        self.runs.clear()
+        if not rows:
+            self.runs.addItem("No completed runs recorded yet")
+            self.v_run.setEnabled(False)
+            return
+        for r in rows:
+            self.runs.addItem(self._run_label(r))
+        self._sync_version()
+
+    def _sync_version(self):
+        self.runs.setEnabled(self.v_run.isChecked() and bool(self._run_rows)
+                             if hasattr(self, "_run_rows") else False)
+        self.when.setEnabled(self.v_time.isChecked())
+        if self.v_run.isChecked() or self.v_time.isChecked():
+            self.v_note.setText("Restores each file as it was at that point: the newest copy "
+                                "archived up to then. Files archived later are left out. The "
+                                "archive is append-only, so files deleted from the source "
+                                "before then are still included.")
+        elif self.v_new.isEnabled() and self.v_run.isEnabled():
+            self.v_note.setText("")
+        # the note wraps to a different height per choice: re-lay the dialog
+        self.v_note.setMinimumHeight(self.v_note.heightForWidth(max(300, self.v_note.width()))
+                                     if self.v_note.text() else 0)
+        self.adjustSize()
+
+    def as_of(self):
+        """UTC cutoff for point-in-time restore, or None for 'newest'."""
+        from datetime import timezone
+        if self.v_run.isChecked() and self._run_rows:
+            return self._run_rows[self.runs.currentIndex()]["end_ts"]
+        if self.v_time.isChecked():
+            return self.when.dateTime().toPython().astimezone(timezone.utc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1406,6 +1621,7 @@ class ArchiveJob(Job):
         self.last = {}
         self.summary = None
         self.failed_list = None
+        self.incremental = "--incremental" in cmd
 
     def retry_command(self):
         """Same run settings, but the source is this run's failed-file list
@@ -1507,6 +1723,12 @@ class ArchiveJob(Job):
             self.phase = "committing manifest"
         found = (f"{p['scanned_files']:,} files / {human(scanned)} found"
                  + ("" if p["scan_done"] else " so far"))
+        if self.incremental:
+            checked = p["scanned_files"] + p.get("unchanged", 0)
+            found = (f"{checked:,} checked · {p['scanned_files']:,} changed / {human(scanned)}"
+                     + ("" if p["scan_done"] else " so far"))
+            if not p["scan_done"] and not p["active"]:
+                self.phase = "checking for changes"
         self.detail = (f"{p['files_done']:,} archived · {p['tars_done']:,} tars · "
                        f"{p['rows_committed']:,} manifest rows · {p['failed']:,} failed · {found}")
         self.active = [(posixpath.basename(e["tar"]), e["phase"], e["done"], e["total"],
@@ -1514,7 +1736,7 @@ class ArchiveJob(Job):
         self.counts = (p.get("bundling", 0), p.get("uploading", 0))
         if p.get("failed_list"):
             self.failed_list = p["failed_list"]
-        if p.get("unchanged"):
+        if p.get("unchanged") and not self.incremental:
             self.detail += f" · {p['unchanged']:,} unchanged (incremental)"
         if p.get("skipped"):
             self.detail += f" · {p['skipped']:,} skipped (symlinks/special)"
@@ -1547,8 +1769,9 @@ class ArchiveJob(Job):
 
 class RestoreJob(Job):
     def __init__(self, cfg, manifest, selections, dest, overwrite, verify, concurrency,
-                 est_files, est_bytes, title):
+                 est_files, est_bytes, title, as_of=None):
         super().__init__("restore", title)
+        self.as_of = as_of
         self.engine = RestoreEngine(cfg, dest, overwrite=overwrite, verify_md5=verify,
                                     concurrency=concurrency)
         self.manifest = manifest
@@ -1564,7 +1787,10 @@ class RestoreJob(Job):
     def start(self):
         self.state, self.phase = "running", "querying manifest"
         self.log.emit(f"[job {self.id}] restore {len(self.selections)} item(s) -> {self.engine.dest}")
-        t = Task(self.engine.run, self.manifest, self.selections)
+        if self.as_of is not None:
+            self.log.emit(f"[job {self.id}] point-in-time: newest copies archived at or "
+                          f"before {fmt_ts(self.as_of)}")
+        t = Task(self.engine.run, self.manifest, self.selections, as_of=self.as_of)
         t.signals = self._sig
         QThreadPool.globalInstance().start(t)
         self.timer.start(500)
@@ -1878,7 +2104,8 @@ class MainWindow(QMainWindow):
             return
         if skipped:
             self._status_msg(f"Restore: {skipped} selected S3 folder(s)/non-tar object(s) ignored")
-        dlg = RestoreDialog(sel, files, nbytes, self.local.restore_target(), self)
+        dlg = RestoreDialog(sel, files, nbytes, self.local.restore_target(), self,
+                            manifest=self.archive.manifest)
         if not dlg.exec():
             return
         dest = dlg.dest.text().strip()
@@ -1887,9 +2114,13 @@ class MainWindow(QMainWindow):
             return
         first = selection_label(*sel[0])
         title = first + (f" +{len(sel) - 1}" if len(sel) > 1 else "")
+        as_of = dlg.as_of()
+        if as_of is not None:
+            title += f" (as of {fmt_ts(as_of)})"
         job = RestoreJob(self.s.config(), self.archive.manifest, sel, dest,
                          dlg.overwrite.isChecked(), dlg.verify.isChecked(),
-                         self.s.restore_concurrency(), files, nbytes, f"{title} → {dest}")
+                         self.s.restore_concurrency(), files, nbytes, f"{title} → {dest}",
+                         as_of=as_of)
         self.monitor.add(job)
         job.finished.connect(self._job_finished)
         job.start()

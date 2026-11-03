@@ -6,11 +6,18 @@ An archiving solution that **bundles** large numbers of small filesystem files i
 
 Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution), this version moves the manifest from CSV objects to S3 Tables and reworks the internals with single-pass MD5, streaming tar, batched commits, and multiprocess parallelism.
 
+<p align="center">
+  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="Demo: setup wizard, archiving 523,124 files, browsing, restore and an incremental run"></a><br>
+  <b>▶ Click the preview for the full 2-minute demo video (MP4)</b>
+</p>
+
 ## Desktop GUI — start here
 
 The easiest way to use the solution is the desktop app in [`gui`](gui/README.md). **See the [GUI user guide](gui/README.md)** for every screen, step by step.
 
 ![Main window: local disk on the left, the archive's original files on the right, jobs at the bottom](gui/docs/images/21-browse-files.png)
+
+▶ **[2-minute demo video](gui/docs/demo.mp4)**: setup, archiving 523,124 files, browsing, restore and an incremental run.
 
 ```bash
 cd gui && ./run-gui.sh      # first run creates its own Python environment
@@ -189,6 +196,8 @@ Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-i
 | `--path-column` | csv/tsv report column with the path: header name (e.g. `path`) or 0-based index. Relative paths resolve against `--src-path` | 0 |
 | `--run-history` / `--no-run-history` | record every run (status, counts, watermark, failed-list location) in `<table-name>_runs`; required by `--incremental` | on |
 | `--tar-storageclass` | storage class for tar objects (see below) | STANDARD |
+| `--part-size` | multipart upload part size, also the single-PUT threshold: `8MB`, `16MB`, `32MB`, `64MB`. Every part is a billed request; see §5.3 | 32MB |
+| `--tar-layout` | folder level for tars under `--dst-prefix`: `run` = `<prefix>/<run-id>/` (one folder per run, so each full or incremental run can be checked, reconciled or cleaned up as a unit), `date` = `<prefix>/<YYYYMMDD>/` (the earlier layout), `flat` = `<prefix>/`. Existing archives keep working: the manifest stores full tar keys | run |
 | `--spool-max-mb` | in-memory threshold for a tar (spills to disk above it) | 256 |
 | `--compress` | gzip the tar (⚠️ see limitations) | off |
 
@@ -201,7 +210,9 @@ python v3/fss3-archiver-s3tables-mp.py --src-path <same base> \
 
 Symlinks and special files are counted as **skipped**, not failed, and are not listed: retrying them would only skip them again. A run ends `ok` (no failures), `partial` (some failed — still advances the incremental watermark; retry the list) or `failed`.
 
-Storage layout: tars go to `s3://<bucket>/<prefix>/<YYYYMMDD>/archive_<run-id>_<NNNNN>.tar`; the manifest is written to the S3 Tables table.
+Storage layout: tars go to `s3://<bucket>/<prefix>/<run-id>/archive_<run-id>_<NNNNN>.tar` by default (`--tar-layout run`; `date` puts them under `<YYYYMMDD>/` as before, `flat` directly under the prefix); the manifest is written to the S3 Tables table.
+
+> ⚠️ With incremental runs, an older run folder still holds every file that has not changed since — delete run folders only for failed or cancelled runs, never to "clean up" a successful one.
 
 #### `--scan-threads`
 
@@ -359,11 +370,55 @@ For the 1M-file run:
 
 → About **1,000× fewer** PUT requests. Since each tar is 20 MB, it also avoids the 128 KB minimum-billing penalty of GLACIER_IR / IA entirely if you move the tars there.
 
-### 5.3 Cost (approximate)
+### 5.3 Cost comparison: individual objects vs bundled tars
 
-At this scale (~20 GB source, 979 tars, 1M manifest rows) the monthly storage cost — tars in GLACIER_IR plus the S3 Tables manifest — is **very low** (order of tens of cents/month). Keeping the manifest in S3 Tables does not inflate cost, because **batched commits (50,000 rows/commit)** avoid small-file / snapshot explosion, so it does not offset the bundling savings.
+Prices are AWS list prices for **Asia Pacific (Seoul, ap-northeast-2)**, read from the AWS Price List API on 2026-11-03, excluding tax and free tier. Check current prices for your Region before deciding.
 
-> Compute exact figures from region/period-specific rates (the above is approximate).
+**Example data:** 523,124 files, 9.9 GiB. The average file is 19.9 KiB, and every file is under 128 KiB, which is typical of the small-file archives this solution targets. Bundled means 256 MB tars uploaded with 32 MB parts (≈ 42 tars). Tar headers and padding add 3.8 % to the stored bytes. The S3 Tables manifest is about 34 bytes per file (17 MiB here) and is included in the bundled storage figure.
+
+| Storage class | | Upload requests | Upload (one time) | Billed storage | Storage / month | First year |
+|---|---|---|---|---|---|---|
+| STANDARD | individual files | 523,124 | $2.35 | 9.9 GiB | $0.249 | $5.34 |
+| | **bundled tars** | **415** | **$0.0019** | 10.3 GiB + 17 MiB manifest | **$0.259** | **$3.10** |
+| GLACIER_IR | individual files | 523,124 | $10.46 | 63.9 GiB | $0.319 | $14.29 |
+| | **bundled tars** | **415** | **$0.0083** | 10.3 GiB + 17 MiB manifest | **$0.052** | **$0.633** |
+| DEEP_ARCHIVE | individual files | 523,124 | $31.39 | 29.9 GiB | $0.152 | $33.21 |
+| | **bundled tars** | **415** | **$0.0042** | 10.3 GiB + 17 MiB manifest | **$0.021** | **$0.258** |
+
+**The same data scaled to 100 million files (1.9 TiB):**
+
+| Storage class | | Upload (one time) | Storage / month | First year |
+|---|---|---|---|---|
+| STANDARD | individual / **bundled** | $450.00 / **$0.36** | $47.54 / **$49.42** | $1,020 / **$593** |
+| GLACIER_IR | individual / **bundled** | $2,000.00 / **$1.58** | $61.04 / **$9.96** | $2,732 / **$121** |
+| DEEP_ARCHIVE | individual / **bundled** | $6,000.00 / **$0.79** | $28.98 / **$4.04** | $6,348 / **$49** |
+
+**Where the difference comes from:**
+
+- **Upload requests.** Every individual file is a PUT, so 1,260× more requests than 415 for the tars. PUT prices also rise with the class: $0.0045 per 1,000 requests for STANDARD, $0.02 for GLACIER_IR, $0.06 for DEEP_ARCHIVE in Seoul.
+- **Minimum billable size.** GLACIER_IR (and STANDARD_IA / ONEZONE_IA) bills every object as at least 128 KiB. Here that turns 9.9 GiB into 63.9 GiB billed as individual files. Tars are far above the minimum.
+- **Per-object overhead.** GLACIER and DEEP_ARCHIVE add 40 KiB per object: 32 KiB at the archive rate plus 8 KiB at the STANDARD rate. For 20 KiB files that triples the billed size. 42 tars add 1.6 MiB in total.
+- **STANDARD storage is slightly higher when bundled** (tar padding plus the manifest), but the request savings outweigh it from the first upload.
+- **Lifecycle transitions** cost per object. Moving 523,124 individual objects from STANDARD to GLACIER_IR later costs $10.46, while 42 tars cost < $0.001.
+- **Restores.** Restoring a 503-file folder takes 503 GETs as individual objects and **1 ranged GET** from the tar (measured; nearby byte ranges are merged). GET-request savings are small per restore. The per-GB retrieval fee of GLACIER_IR is the same either way.
+
+#### Upload part size (`--part-size`, GUI: *Upload part size*)
+
+Each multipart part is a billed PUT-class request, so larger parts mean fewer requests. For the example data in GLACIER_IR:
+
+| Part size | Requests per 256 MB tar | Requests (523k files) | Upload cost | Upload cost for 100 M files |
+|---|---|---|---|---|
+| 8 MB | 34 | 1,406 | $0.028 | $5.38 |
+| 16 MB | 18 | 745 | $0.015 | $2.85 |
+| **32 MB (default)** | **10** | **415** | **$0.0083** | **$1.59** |
+| 64 MB | 6 | 250 | $0.0050 | $0.96 |
+
+- **When the part size matters:** it changes the upload cost by up to 5.6×. That's small next to the savings from bundling itself, but it adds up at petabyte scale.
+- **Costs of larger parts:** more memory (about part size × `--upload-concurrency` per worker), less parallelism within one tar, and more data re-sent when a part fails.
+- **GLACIER and DEEP_ARCHIVE:** `UploadPart` and `CreateMultipartUpload` are billed at the STANDARD request rate; only `CompleteMultipartUpload` (or a single `PutObject`) pays the archive-class rate.
+- **Small tars:** a tar no larger than one part is uploaded as a single PUT.
+
+Not included: data transfer, S3 Tables maintenance (compaction at $0.005 per GB processed and $0.00175 per 1,000 objects, plus monitoring of the manifest's data files: cents at this scale), Athena queries, and minimum storage durations (30 days STANDARD_IA, 90 days GLACIER_IR / GLACIER, 180 days DEEP_ARCHIVE). Those minimums apply to whatever you store, bundled or not.
 
 ### 5.4 Integrity verification
 
@@ -387,7 +442,7 @@ Yes. Amazon S3 Tables explicitly supports concurrent writers to a single table (
 
 ### What you must get right
 
-**Give each run a distinct tar namespace.** Tar keys are `<prefix>/<YYYYMMDD>/archive_<run-id>_<NNNNN>.tar`, and `--run-id` defaults to `<timestamp>_<pid>_<rand>` — unique per process, so the default is already safe even for runs launched in the same second from a shell loop. Only override `--run-id` if you need a reproducible name, and never reuse one value for two live runs sharing a `--dst-prefix`: they would overwrite each other's tars, leaving manifest rows pointing at a tar that no longer holds those files.
+**Give each run a distinct tar namespace.** Tar keys are `<prefix>/<run-id>/archive_<run-id>_<NNNNN>.tar` (or `<YYYYMMDD>/` / no folder with `--tar-layout date|flat`), and `--run-id` defaults to `<timestamp>_<pid>_<rand>` — unique per process, so the default is already safe even for runs launched in the same second from a shell loop. Only override `--run-id` if you need a reproducible name, and never reuse one value for two live runs sharing a `--dst-prefix`: they would overwrite each other's tars, leaving manifest rows pointing at a tar that no longer holds those files.
 
 **Keep `--src-path` the same across the runs, and split the work with `--input-file`.** `source_key` is stored *relative to that run's `--src-path`*, so giving each run a different subtree as its `--src-path` makes the relative paths collide: three runs over `fs1/`, `fs2/`, `fs3/` all record `f000.dat`, and there is no longer anything in the row that says which subtree it came from. Measured on a 210-file, 4-run test: 210 rows but only **60 distinct `source_key`** — reconciliation undercounts by 150, and a LOOKUP restore for `f000.dat` is ambiguous between subtrees. Point every run at the common parent and hand each one a list instead:
 
