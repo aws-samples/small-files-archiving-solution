@@ -38,7 +38,7 @@ Examples:
   python fss3-restore.py \
     --region ap-northeast-2 \
     --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
-    --namespace archive --table-name manifest \
+    --namespace small_files_archive --table-name tar_manifest \
     --source-key sub/file0499.dat \
     --tar-bucket my-bucket \
     --out-dir ./restored/ --verify-md5
@@ -195,8 +195,8 @@ def main():
     l.add_argument("--source-key", help="exact original relative path to find")
     l.add_argument("--region", help="AWS region of the S3 Tables bucket")
     l.add_argument("--table-bucket-arn", help="S3 Tables table bucket ARN")
-    l.add_argument("--namespace", default="archive")
-    l.add_argument("--table-name", default="manifest")
+    l.add_argument("--namespace", default="small_files_archive")
+    l.add_argument("--table-name", default="tar_manifest")
 
     p.add_argument("--verify-md5", nargs="?", const=True, default=False,
                    help="verify the extracted bytes against md5. In LOOKUP mode "

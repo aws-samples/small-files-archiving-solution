@@ -6,8 +6,32 @@
 
 원본은 [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution)이며, 이 버전은 매니페스트 저장을 CSV 오브젝트에서 S3 Tables로 전환하고, 단일 읽기 MD5·스트리밍 tar·배치 커밋·멀티프로세스 병렬화를 적용해 재구성했습니다.
 
+## 데스크톱 GUI — 여기서 시작하세요
+
+가장 쉬운 사용 방법은 [`gui`](gui/README.md)의 데스크톱 앱입니다. 모든 화면의 단계별 설명은 **[GUI 사용자 가이드](gui/README.md)**(영문)를 참고하세요.
+
+![메인 화면: 왼쪽은 로컬 디스크, 오른쪽은 아카이브의 원본 파일, 아래는 작업 모니터링](gui/docs/images/21-browse-files.png)
+
+```bash
+cd gui && ./run-gui.sh      # 첫 실행 시 자체 Python 환경을 만듭니다
+```
+
+1. **설정:** 첫 실행 마법사가 S3 Tables table bucket, 매니페스트 테이블, 비공개 tar 버킷을 이름으로 선택하거나 생성합니다. ARN을 찾을 필요가 없습니다. → [가이드 §2](gui/README.md#2-first-run-setup-wizard)
+2. **아카이빙:** 왼쪽에서 폴더를 선택하고 **Archive →**를 누릅니다. 처리 중인 tar마다 번들링/업로드 진행 막대가 표시됩니다. → [§4](gui/README.md#4-archive-files)
+3. **탐색:** 오른쪽 패널에 **원본 파일과 폴더**가 보이고, 각 파일이 담긴 tar와 byte 범위도 표시됩니다. **Tar objects**로 전환하면 tar 자체를 볼 수 있습니다. → [§5](gui/README.md#5-browse-the-archive)
+4. **복원:** 오른쪽에서 파일이나 폴더를 선택하고 **← Restore**를 누릅니다. 필요한 byte 범위만 가져오고 MD5를 검증합니다. → [§6](gui/README.md#6-restore-files)
+
+GUI에서는 [incremental 실행](gui/README.md#7-incremental-archiving), [파일 목록 리포트 입력](gui/README.md#8-archive-from-a-file-list-report), [실패 파일 원클릭 재시도](gui/README.md#9-failed-files-and-retry)도 지원합니다.
+
+| 설정 마법사 | 아카이빙 진행 중 |
+|---|---|
+| ![마법사](gui/docs/images/06-wizard-applied.png) | ![진행 상황](gui/docs/images/12-archiving-progress.png) |
+
+이 문서의 나머지 부분은 GUI가 내부에서 실행하는 명령줄 아카이버와 복원 스크립트를 설명합니다.
+
 ### 주요 기능
 
+- **데스크톱 GUI** — 설정 마법사, 이중 패널 탐색(원본 파일 ↔ tar 객체), tar별 진행 상황을 보여주는 아카이빙/복원, incremental 실행, 리포트 입력, 실패 파일 재시도. 위 내용 참고.
 - **파일 번들링** — 다수의 소용량 파일을 큰 tar 오브젝트로 묶어 PUT 요청 수를 줄이고 소용량 과금 페널티(예: Glacier IR 128KB 최소 과금)를 회피.
 - **S3 Tables 매니페스트** — 각 파일의 `tar_key` + byte 범위를 관리형 Apache Iceberg 테이블에 기록해, tar 안의 개별 파일을 계속 찾을 수 있게 함.
 - **개별 파일 직접 복원** — tar 전체를 내려받지 않고 byte-range GET으로 tar에서 파일 하나만 바로 추출(`fss3-restore.py`).
@@ -70,8 +94,9 @@
 - 사전 생성된 S3 버킷(tar 저장용)과 S3 Tables 테이블 버킷(매니페스트용). 네임스페이스·테이블은 스크립트가 자동(idempotent) 생성.
 
 ```bash
-pip install "pyiceberg[pyarrow]" boto3
+pip install "pyiceberg[pyarrow,pyiceberg-core]" boto3
 # 테스트 검증: pyiceberg 0.11.1 / pyarrow 18.1.0 / boto3 1.39.17
+# pyiceberg 0.12 이상은 day 파티션 테이블에 append하려면 pyiceberg-core extra가 필요 (0.12.0 / pyarrow 26.0.0 / boto3 1.43에서도 검증)
 ```
 
 필요 IAM 권한 (매니페스트, S3 Tables 직접 endpoint 기준):
@@ -104,8 +129,8 @@ python fss3-archiver-s3tables-mp.py \
   --md5 \
   --region           ap-northeast-2 \
   --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
-  --namespace        archive \
-  --table-name       manifest \
+  --namespace        small_files_archive \
+  --table-name       tar_manifest \
   --batch-size       50000 \
   --tar-storageclass GLACIER_IR
 ```
@@ -124,7 +149,7 @@ python fss3-archiver-s3tables-mp.py \
   --input-file files-to-archive.txt --max-files 1000
 ```
 
-한 줄에 절대 경로 하나(빈 줄·`#` 주석은 건너뜀). 존재하지 않는 경로, 심볼릭 링크, 일반 파일이 아닌 항목은 건너뛰고 로그에 남기되 실행을 멈추지 않습니다. `--src-path`는 여전히 필수 — 각 tar 멤버의 상대 경로 기준이며, 파일이 `--src-path` 하위에 있으면 그 기준 상대 경로로, 아니면 앞의 `/`를 뗀 전체 경로로 저장됩니다.
+한 줄에 절대 경로 하나(빈 줄·`#` 주석은 건너뜀). 존재하지 않거나 읽을 수 없는 경로는 실패로 집계되어 실패 파일 목록에 기록되고, 심볼릭 링크와 일반 파일이 아닌 항목은 건너뜁니다. 어느 쪽도 실행을 멈추지 않습니다. CSV/TSV 리포트도 입력으로 쓸 수 있습니다(`--input-format` / `--path-column` 참고). `--src-path`는 여전히 필수 — 각 tar 멤버의 상대 경로 기준이며, 파일이 `--src-path` 하위에 있으면 그 기준 상대 경로로, 아니면 앞의 `/`를 뗀 전체 경로로 저장됩니다.
 
 **콜드·write-once 데이터 — 압축:**
 
@@ -150,13 +175,30 @@ python fss3-archiver-s3tables-mp.py \
 | `--md5` | 무결성 검증용 파일별 MD5 계산·저장 | on (기본값) |
 | `--region` | AWS 리전 | (필수) |
 | `--table-bucket-arn` | S3 Tables 테이블 버킷 ARN | (필수) |
-| `--namespace` / `--table-name` | 매니페스트 네임스페이스 / 테이블 | archive / manifest |
+| `--namespace` / `--table-name` | 매니페스트 네임스페이스 / 테이블 | small_files_archive / tar_manifest |
 | `--batch-size` | 매니페스트 커밋당 행 수 | 50000 |
 | `--flush-interval` | 배치가 다 차지 않아도 커밋하는 대기 시간(초) | 15 |
 | `--commit-retries` | 매니페스트 커밋 1건당 시도 횟수 (초과 시 실행 중단) | 8 |
+| `--dir-index` / `--no-dir-index` | GUI가 수십억 파일 규모에서도 폴더 단위로 목록을 조회할 수 있도록 `<table-name>_dirs` 디렉터리 인덱스와 매니페스트 `parent_dir` 컬럼을 유지 (기존 테이블엔 additive 스키마 진화로 `parent_dir` 추가) | on |
+| `--walk-path` | `--src-path` 하위의 이 디렉터리/파일만 순회 (반복 지정 가능); 경로는 `--src-path` 기준 상대 경로이므로 `--src-path /data --walk-path /data/photos`는 `photos/...`로 저장 | off |
+| `--progress` | JSON 진행 상황 스냅샷을 stdout에 출력 (`@@PROGRESS ` 접두사); GUI가 사용 | off |
+| `--incremental` | **같은 소스**(동일한 `--src-path` + `--walk-path` 조합)의 마지막 성공(`ok`/`partial`) 실행 시작 시각 이후 mtime **또는** ctime이 바뀐 파일만 아카이빙 (`<table-name>_runs`에서 조회). ctime으로 이름 변경/이동도 감지. 소스의 첫 실행은 전체를 아카이빙. `--input-file`과 함께 쓸 수 없음 | off |
+| `--watermark-skew` | 호스트/파일 서버 간 시계 차이를 흡수하기 위해 워터마크에서 빼는 초; 겹치는 구간의 파일은 다시 아카이빙될 뿐 누락되지 않음 | 300 |
+| `--input-format` | `--input-file` 형식: `lines`(한 줄에 경로 하나), `csv`, `tsv`(파일 목록 리포트); `auto`는 확장자로 판단; `.gz`는 자동으로 해제 | auto |
+| `--path-column` | csv/tsv 리포트에서 경로가 들어 있는 컬럼: 헤더 이름(예: `path`) 또는 0부터 시작하는 인덱스. 상대 경로는 `--src-path` 기준 | 0 |
+| `--run-history` / `--no-run-history` | 모든 실행(상태, 건수, 워터마크, 실패 목록 위치)을 `<table-name>_runs`에 기록; `--incremental`에 필요 | on |
 | `--tar-storageclass` | tar 오브젝트 스토리지 클래스 (아래 참고) | STANDARD |
 | `--spool-max-mb` | tar를 메모리에 두는 임계(초과 시 디스크) | 256 |
 | `--compress` | tar를 gzip 압축 (⚠️ 아래 제약 참고) | off |
+
+**실패 파일과 재시도.** 아카이빙하지 못한 모든 파일은 `logs/<dst-prefix>/failed_<run-id>.txt`에 한 줄에 절대 경로 하나씩 스트리밍으로 기록됩니다. stat 오류, 읽을 수 없는 파일, 업로드에 실패한 tar에 들어 있던 모든 파일이 대상입니다. 옆의 `.tsv`에는 실패 사유가 남습니다. 같은 설정으로 재시도하세요:
+
+```bash
+python v3/fss3-archiver-s3tables-mp.py --src-path <동일한 기준 경로> \
+  --input-file logs/<dst-prefix>/failed_<run-id>.txt ...   # 동일한 병렬 파이프라인
+```
+
+심볼릭 링크와 특수 파일은 실패가 아니라 **skipped**로 집계되며 목록에 넣지 않습니다. 재시도해도 다시 건너뛰기 때문입니다. 실행 결과는 `ok`(실패 없음), `partial`(일부 실패 — 워터마크는 전진하므로 목록으로 재시도) 또는 `failed`입니다.
 
 저장 경로: tar는 `s3://<bucket>/<prefix>/<YYYYMMDD>/archive_<run-id>_<NNNNN>.tar`, 매니페스트는 S3 Tables 테이블에 기록.
 
@@ -236,6 +278,9 @@ time ls -d /data/nfsshare/*/ | xargs -P 8 -I{} find {} -type f -printf ''
 | `md5` | string | 원본 파일 MD5 (기본 계산; 비활성화한 경우에만 null) |
 | `filesize` | long | 원본 파일 크기 |
 | `archive_ts` | timestamptz | 아카이빙 시각 (파티션: `day(archive_ts)`) |
+| `parent_dir` | string | `source_key`의 디렉터리 (루트는 `''`); `--dir-index`로 기록, 도입 이전 행은 null |
+
+보조 테이블 `<table-name>_dirs`(`parent_dir`, `dir_path`, `files`, `bytes`, `archive_ts`, `run_id`)는 커밋마다 처리한 모든 디렉터리의 **재귀** 파일 수/바이트 합계를 담습니다. `dir_path`별로 합산하면 폴더 합계가 되며, 여러 실행에서 아카이빙된 경로는 실행마다 한 번씩 집계됩니다.
 
 ---
 
@@ -245,7 +290,7 @@ time ls -d /data/nfsshare/*/ | xargs -P 8 -I{} find {} -type f -printf ''
 
 ```sql
 SELECT tar_key, byte_start, byte_end, md5
-FROM archive.manifest
+FROM small_files_archive.tar_manifest
 WHERE source_key LIKE '%file0499%'
   AND archive_ts BETWEEN TIMESTAMP '2026-08-04' AND TIMESTAMP '2026-08-05';
 ```
@@ -274,8 +319,8 @@ python fss3-restore.py \
 python fss3-restore.py \
   --region           ap-northeast-2 \
   --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
-  --namespace        archive \
-  --table-name       manifest \
+  --namespace        small_files_archive \
+  --table-name       tar_manifest \
   --source-key       sub/file0499.dat \
   --tar-bucket       your-own-dest-bucket \
   --out-dir          ./restored/ \

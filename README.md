@@ -6,8 +6,32 @@ An archiving solution that **bundles** large numbers of small filesystem files i
 
 Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution), this version moves the manifest from CSV objects to S3 Tables and reworks the internals with single-pass MD5, streaming tar, batched commits, and multiprocess parallelism.
 
+## Desktop GUI — start here
+
+The easiest way to use the solution is the desktop app in [`v3/gui`](v3/gui/README.md). **See the [GUI user guide](v3/gui/README.md)** for every screen, step by step.
+
+![Main window: local disk on the left, the archive's original files on the right, jobs at the bottom](v3/gui/docs/images/21-browse-files.png)
+
+```bash
+cd v3/gui && ./run-gui.sh      # first run creates its own Python environment
+```
+
+1. **Set up:** a first-run wizard picks or creates the S3 Tables table bucket, the manifest tables and a private tar bucket, all by name, with no ARNs to look up. → [guide §2](v3/gui/README.md#2-first-run-setup-wizard)
+2. **Archive:** select folders on the left and click **Archive →**. Each tar in flight gets its own bundling or uploading bar. → [§4](v3/gui/README.md#4-archive-files)
+3. **Browse:** the right pane shows your **original files and folders**, with the tar and byte range of each file. Switch to **Tar objects** to see the tars themselves. → [§5](v3/gui/README.md#5-browse-the-archive)
+4. **Restore:** select files or folders on the right and click **← Restore**. Only the needed byte ranges are fetched, and MD5 is verified. → [§6](v3/gui/README.md#6-restore-files)
+
+Also in the GUI: [incremental runs](v3/gui/README.md#7-incremental-archiving), [file-list reports as input](v3/gui/README.md#8-archive-from-a-file-list-report) and [one-click retry of failed files](v3/gui/README.md#9-failed-files-and-retry).
+
+| Setup wizard | Archiving in progress |
+|---|---|
+| ![Wizard](v3/gui/docs/images/06-wizard-applied.png) | ![Progress](v3/gui/docs/images/12-archiving-progress.png) |
+
+The rest of this document covers the command-line archiver and restore scripts that the GUI runs underneath.
+
 ### Key features
 
+- **Desktop GUI** — setup wizard, dual-pane browse (original files ↔ tar objects), archive/restore with per-tar progress, incremental runs, report input and retry of failed files. See above.
 - **File bundling** — packs many small files into large tar objects, cutting PUT requests and sidestepping the small-object storage penalty (e.g. Glacier IR 128 KB minimum billing).
 - **S3 Tables manifest** — records every file's `tar_key` + byte range in a managed Apache Iceberg table, so an individual file stays locatable inside a tar.
 - **Direct individual-file restore** — extracts a single file straight from its tar via byte-range GET, without downloading the whole tar (`v3/fss3-restore.py`).
@@ -71,8 +95,9 @@ Design points:
 - A pre-created S3 bucket (for tars) and an S3 Tables table bucket (for the manifest). The namespace and table are created automatically (idempotent) by the script.
 
 ```bash
-pip install "pyiceberg[pyarrow]" boto3
+pip install "pyiceberg[pyarrow,pyiceberg-core]" boto3
 # Test-verified: pyiceberg 0.11.1 / pyarrow 18.1.0 / boto3 1.39.17
+# pyiceberg >= 0.12 needs the pyiceberg-core extra to append to the day-partitioned table (also verified: 0.12.0 / pyarrow 26.0.0 / boto3 1.43)
 ```
 
 Required IAM permissions (manifest, S3 Tables direct endpoint):
@@ -105,8 +130,8 @@ python v3/fss3-archiver-s3tables-mp.py \
   --md5 \
   --region           ap-northeast-2 \
   --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
-  --namespace        archive \
-  --table-name       manifest \
+  --namespace        small_files_archive \
+  --table-name       tar_manifest \
   --batch-size       50000 \
   --tar-storageclass GLACIER_IR
 ```
@@ -125,7 +150,7 @@ The remaining scenarios are the baseline **with the noted flags changed**:
   --input-file files-to-archive.txt --max-files 1000
 ```
 
-One absolute path per line (blank lines and `#` comments skipped). Missing paths, symlinks, and non-regular files are skipped and logged, but don't stop the run. `--src-path` is still required — it's the base for each tar member's relative path (stored relative to `--src-path` when the file lies under it, else the full path with the leading `/` dropped).
+One absolute path per line (blank lines and `#` comments skipped). Missing or unreadable paths are counted as failed and go to the failed-file list; symlinks and non-regular files are skipped. Neither stops the run. CSV/TSV reports work too — see `--input-format` / `--path-column`. `--src-path` is still required — it's the base for each tar member's relative path (stored relative to `--src-path` when the file lies under it, else the full path with the leading `/` dropped).
 
 **Cold, write-once data — compress:**
 
@@ -151,13 +176,30 @@ Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-i
 | `--md5` | compute and store per-file MD5 for integrity verification | on (default) |
 | `--region` | AWS region | (required) |
 | `--table-bucket-arn` | S3 Tables table bucket ARN | (required) |
-| `--namespace` / `--table-name` | manifest namespace / table | archive / manifest |
+| `--namespace` / `--table-name` | manifest namespace / table | small_files_archive / tar_manifest |
 | `--batch-size` | rows per manifest commit | 50000 |
 | `--flush-interval` | seconds before a partial manifest batch commits anyway | 15 |
 | `--commit-retries` | attempts per manifest commit before the run aborts | 8 |
+| `--dir-index` / `--no-dir-index` | maintain the `<table-name>_dirs` directory index and the manifest `parent_dir` column so the GUI can list one folder at a time at billion-file scale (adds `parent_dir` to an existing table by additive schema evolution) | on |
+| `--walk-path` | walk only this directory/file under `--src-path` (repeatable); paths stay relative to `--src-path`, so `--src-path /data --walk-path /data/photos` stores `photos/...` | off |
+| `--progress` | print JSON progress snapshots to stdout (lines prefixed `@@PROGRESS `); used by the GUI | off |
+| `--incremental` | archive only files whose mtime **or** ctime is newer than the start of the last successful (`ok`/`partial`) run of the **same source** (same `--src-path` + `--walk-path` set), read from `<table-name>_runs`. ctime catches renames/moves. The first run of a source archives everything. Not combinable with `--input-file` | off |
+| `--watermark-skew` | seconds subtracted from the incremental watermark for clock differences between hosts / the file server; files in the overlap are re-archived, never missed | 300 |
+| `--input-format` | `--input-file` format: `lines` (one path per line), `csv`, `tsv` (a file-list report); `auto` picks by extension; `.gz` is read transparently | auto |
+| `--path-column` | csv/tsv report column with the path: header name (e.g. `path`) or 0-based index. Relative paths resolve against `--src-path` | 0 |
+| `--run-history` / `--no-run-history` | record every run (status, counts, watermark, failed-list location) in `<table-name>_runs`; required by `--incremental` | on |
 | `--tar-storageclass` | storage class for tar objects (see below) | STANDARD |
 | `--spool-max-mb` | in-memory threshold for a tar (spills to disk above it) | 256 |
 | `--compress` | gzip the tar (⚠️ see limitations) | off |
+
+**Failed files and retry.** Every file that could not be archived — stat errors, unreadable files, and every file of a tar whose upload failed — is streamed to `logs/<dst-prefix>/failed_<run-id>.txt`, one absolute path per line. A `.tsv` next to it holds the reasons. Retry with the same settings:
+
+```bash
+python v3/fss3-archiver-s3tables-mp.py --src-path <same base> \
+  --input-file logs/<dst-prefix>/failed_<run-id>.txt ...   # same parallel pipeline
+```
+
+Symlinks and special files are counted as **skipped**, not failed, and are not listed: retrying them would only skip them again. A run ends `ok` (no failures), `partial` (some failed — still advances the incremental watermark; retry the list) or `failed`.
 
 Storage layout: tars go to `s3://<bucket>/<prefix>/<YYYYMMDD>/archive_<run-id>_<NNNNN>.tar`; the manifest is written to the S3 Tables table.
 
@@ -237,6 +279,9 @@ Think of it as: `--max-files` decides how many **boxes** you pack the files into
 | `md5` | string | MD5 of the original file (computed by default; null only if disabled) |
 | `filesize` | long | original file size |
 | `archive_ts` | timestamptz | archive time (partition: `day(archive_ts)`) |
+| `parent_dir` | string | directory of `source_key` (`''` at the root); written with `--dir-index`, null on rows from before it existed |
+
+A companion table `<table-name>_dirs` (`parent_dir`, `dir_path`, `files`, `bytes`, `archive_ts`, `run_id`) holds per-commit **recursive** file/byte totals for every directory touched. Summing rows per `dir_path` gives folder totals; a path archived in several runs is counted once per run.
 
 ---
 
@@ -246,7 +291,7 @@ Think of it as: `--max-files` decides how many **boxes** you pack the files into
 
 ```sql
 SELECT tar_key, byte_start, byte_end, md5
-FROM archive.manifest
+FROM small_files_archive.tar_manifest
 WHERE source_key LIKE '%file0499%'
   AND archive_ts BETWEEN TIMESTAMP '2026-08-04' AND TIMESTAMP '2026-08-05';
 ```
@@ -275,8 +320,8 @@ python v3/fss3-restore.py \
 python v3/fss3-restore.py \
   --region           ap-northeast-2 \
   --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
-  --namespace        archive \
-  --table-name       manifest \
+  --namespace        small_files_archive \
+  --table-name       tar_manifest \
   --source-key       sub/file0499.dat \
   --tar-bucket       your-own-dest-bucket \
   --out-dir          ./restored/ \
