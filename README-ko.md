@@ -17,7 +17,7 @@
 
 ![메인 화면: 왼쪽은 로컬 디스크, 오른쪽은 아카이브의 원본 파일, 아래는 작업 모니터링](gui/docs/images/21-browse-files.png)
 
-▶ **[1분 소개 영상](gui/docs/demo.mp4)**: 소용량 파일이 왜 비싼지, 그리고 설정, EC2에서 S3 버킷의 객체 482,980개 아카이빙, 탐색, 복원. **[2분 둘러보기](gui/docs/demo-walkthrough.mp4)**: 로컬 디스크의 파일 523,124개 아카이빙, 탐색, 복원, incremental 실행.
+▶ **[1분 소개 영상](gui/docs/demo.mp4)**: 소용량 파일이 왜 비싼지, 그리고 설정, 두 가지 소스(로컬 디스크 또는 S3 버킷), EC2에서 S3 버킷의 객체 482,980개 아카이빙, 파일 보기와 tar 보기 전환, 복원. **[2분 둘러보기](gui/docs/demo-walkthrough.mp4)**: 로컬 디스크의 파일 523,124개 아카이빙, 탐색, 복원, incremental 실행.
 
 ```bash
 cd gui && ./run-gui.sh      # 첫 실행 시 자체 Python 환경을 만듭니다

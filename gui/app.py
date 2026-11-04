@@ -1270,16 +1270,20 @@ class ArchivePane(QWidget):
         if prev == "tars":
             keys = self._tars_in_view()
             # Came here from a Files folder and haven't moved since (same prefix,
-            # no tar opened, selection untouched or cleared)? Then return to that
-            # folder -- the tars' common folder is usually much higher, because
-            # one tar mixes files from many folders.
+            # selection untouched or cleared, or opened one of that folder's own
+            # tars)? Then return to that folder -- the tars' common folder is
+            # usually much higher, because one tar mixes files from many folders.
             link = getattr(self, "_link", None)
-            if link and not self.tar_open and self.tar_prefix == link["prefix"]:
-                cur = {self.model.items[i.row()].get("key")
-                       for i in self.view.selectionModel().selectedRows(0)} \
-                    if self.model.mode == "tars" else set()
-                if not cur or cur == link["auto"]:
-                    back_to = link["folder"]
+            if link and self.tar_prefix == link["prefix"]:
+                if self.tar_open:
+                    if self.tar_open.lstrip("/") in link.get("tars", set()):
+                        back_to = link["folder"]
+                else:
+                    cur = {self.model.items[i.row()].get("key")
+                           for i in self.view.selectionModel().selectedRows(0)} \
+                        if self.model.mode == "tars" else set()
+                    if not cur or cur == link["auto"]:
+                        back_to = link["folder"]
         self.mode = mode
         self.btn_files.setChecked(mode == "files"); self.btn_tars.setChecked(mode == "tars")
         self.search.clear()
@@ -1303,7 +1307,8 @@ class ArchivePane(QWidget):
                     self.cd_tars(self.tar_prefix)
                     return
                 self._pending_select = (set(keys), self.cwd, sampled)
-                self._link = {"folder": self.cwd, "prefix": prefix, "auto": set()}
+                self._link = {"folder": self.cwd, "prefix": prefix, "auto": set(),
+                              "tars": {k.lstrip("/") for k in keys}}
                 self.cd_tars(prefix)
 
             run_async(self, self.manifest.tars_for_folder, ok,
