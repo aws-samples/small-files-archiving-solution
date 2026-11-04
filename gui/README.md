@@ -269,12 +269,14 @@ All object reads happen between the instance and S3, inside the Region; your com
 
 #### Or: copy the script and run it yourself
 
-When the instance isn't managed by Systems Manager, or you want to start runs yourself (scheduled, in CloudShell, or one share of a large source per instance), click **Copy script for EC2** in the same dialog:
+When the instance isn't managed by Systems Manager, or you want to start runs yourself (scheduled, in CloudShell, or one share of a large source per instance), click **Copy script for EC2**. It's in both the **Archive from S3** and the local-disk **Archive** dialog:
 
 1. The GUI uploads its archiver version to `s3://<tar bucket>/_sfa/runner/<version>/` (and, for selected objects, the selection list) and copies a short shell script to the clipboard. The script carries the dialog's settings, without your local AWS profile, so the instance role is used.
 2. Open a terminal on the instance (SSH, Session Manager or EC2 Instance Connect) and paste it. The first time, it fetches that version and builds a private Python 3.12 environment in `~/sfa-runner/`. It then starts the archive in the background and prints the log file, the run ID and the PID.
 3. Follow it with `tail -f` on that log. The archive shows up in the GUI's right pane as soon as tars are recorded.
 4. Stop it cleanly with `kill -INT <pid>`. To continue a stopped run, paste the script again with `RESUME_OF="<run id>"` on its first lines.
+
+**Local-disk source:** the paths in the dialog are this computer's, so the script begins with `SRC_PATH='…'`. Change it to where the same data is mounted on the instance (NFS, Amazon EFS or FSx); the selected folders follow it. If the path doesn't exist there, the script stops with a message and starts nothing. A file-list report is uploaded with the script and fetched on the instance.
 
 The script runs inside `bash <<'SFA_EOF' … SFA_EOF`, so an error can't close your terminal. It contains the table bucket ARN, which includes your account ID; don't post it publicly. The instance role needs the archiver permissions and `s3:GetObject` on `_sfa/runner/*`.
 

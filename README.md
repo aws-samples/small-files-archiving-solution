@@ -229,7 +229,7 @@ Both start from the GUI's **Archive from S3** dialog and run exactly the archive
 
 | | **A. Run on EC2 via SSM** (recommended) | **B. Copy the script and run it yourself** |
 |---|---|---|
-| How | Set **Run on** to the instance, then **Start archiving** | Click **Copy script for EC2**, then paste it into a terminal on the instance (SSH, Session Manager or EC2 Instance Connect) |
+| How | Set **Run on** to the instance, then **Start archiving** | Click **Copy script for EC2**, then paste it into a terminal on the instance (SSH, Session Manager or EC2 Instance Connect). Also in the local-disk Archive dialog: change `SRC_PATH` on the first lines to where the data is mounted on the instance |
 | Needs | The instance is Online in Systems Manager; your GUI user may `ssm:SendCommand` to it | Only a shell on the instance |
 | Progress | Live bars, rate, ETA and log in the GUI; it reattaches after you close and reopen the GUI | `tail -f` the log file the script prints |
 | Cancel / Resume | Buttons in the GUI | `kill -INT <pid>` (a clean cancel); paste the script again with `RESUME_OF=<run id>` |

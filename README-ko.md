@@ -228,7 +228,7 @@ boto3로 프로파일링해 보니 병목은 **네트워크가 아니라 CPU**�
 
 | | **A. SSM으로 EC2에서 실행** (권장) | **B. 스크립트를 복사해 직접 실행** |
 |---|---|---|
-| 방법 | **Run on**에서 인스턴스를 고르고 **Start archiving** | **Copy script for EC2**를 누르고, 인스턴스의 터미널(SSH, Session Manager, EC2 Instance Connect)에 붙여 넣기 |
+| 방법 | **Run on**에서 인스턴스를 고르고 **Start archiving** | **Copy script for EC2**를 누르고, 인스턴스의 터미널(SSH, Session Manager, EC2 Instance Connect)에 붙여 넣기. 로컬 디스크 Archive 대화상자에도 있으며, 첫 줄의 `SRC_PATH`를 인스턴스에 데이터가 마운트된 경로로 바꾸면 됨 |
 | 필요 조건 | 인스턴스가 Systems Manager에서 Online이고, GUI 사용자가 그 인스턴스에 `ssm:SendCommand` 가능 | 인스턴스의 셸만 있으면 됨 |
 | 진행 상황 | GUI에서 진행 막대, 속도, ETA, 로그를 실시간으로 확인. GUI를 닫았다 다시 열면 다시 연결됨 | 스크립트가 출력한 로그 파일을 `tail -f` |
 | 취소 / 재개 | GUI의 버튼 | `kill -INT <pid>`(정상 취소). 재개는 `RESUME_OF=<run id>`를 넣어 스크립트를 다시 붙여 넣기 |

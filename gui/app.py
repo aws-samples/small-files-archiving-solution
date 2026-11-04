@@ -825,29 +825,17 @@ class S3ArchiveDialog(QDialog):
 
     # -- manual run on EC2 ------------------------------------------------------
     def kit_args(self):
-        """The archiver arguments of this dialog for a run on EC2: no local
-        progress pipe, no local AWS profile (the instance role is used)."""
+        """The archiver arguments of this dialog for a run on EC2."""
+        import remote as R
         cmd, err = self.command()
         if err:
             return None, err
-        out, skip = [], False
-        for a in cmd[3:]:
-            if skip:
-                skip = False
-                continue
-            if a == "--progress":
-                continue
-            if a == "--profile-name":
-                skip = True
-                continue
-            out.append(a)
-        return out, None
+        return R.gui_only(cmd[3:]), None
 
     def ec2_script(self):
         """Upload this archiver version (and a selection list) to the tar bucket,
         then return a paste-ready shell script that runs these settings on an
         EC2 instance. Blocking: call off the UI thread."""
-        import shlex
         import remote as R
         args, err = self.kit_args()
         if err:
@@ -860,40 +848,8 @@ class S3ArchiveDialog(QDialog):
             key = f"_sfa/jobs/manual-{datetime.now():%Y%m%d_%H%M%S}/selection.txt"
             r.s3.upload_file(args[i], cfg.bucket, key)
             args[i] = f"s3://{cfg.bucket}/{key}"
-        q = shlex.quote
-        pairs, i = [], 0                       # one "--option value" per line
-        while i < len(args):
-            if args[i].startswith("--") and i + 1 < len(args) and not args[i + 1].startswith("--"):
-                pairs.append(f"{args[i]} {q(args[i + 1])}"); i += 2
-            else:
-                pairs.append(q(args[i])); i += 1
-        run = " \\\n    ".join(pairs)
-        return f"""bash <<'SFA_EOF'
-# Small Files Archiver: S3-source run, copied from the GUI on {datetime.now():%Y-%m-%d %H:%M}.
-# Paste into a shell on an EC2 instance in {cfg.region}, the source bucket's Region (no data transfer out).
-set -eu
-RESUME_OF=""     # to continue a stopped run, paste this again with its run id here
-D="$HOME/sfa-runner/{ver}"; W="$HOME/sfa-work"
-if [ ! -f "$D/.ready" ]; then       # first time only: this archiver version + a private Python 3.12
-  mkdir -p "$D"
-  aws s3 cp --recursive --only-show-errors {q(f"s3://{cfg.bucket}/_sfa/runner/{ver}/")} "$D/" --region {q(cfg.region)}
-  UV=$(command -v uv || echo "$HOME/.local/bin/uv")
-  [ -x "$UV" ] || {{ curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null; UV="$HOME/.local/bin/uv"; }}
-  "$UV" venv --quiet --python 3.12 "$D/.venv"
-  "$UV" pip install --quiet --only-binary :all: --python "$D/.venv/bin/python" -r "$D/requirements.txt"
-  touch "$D/.ready"
-fi
-mkdir -p "$W" && cd "$W"
-OUT="$W/archiver-$(date +%Y%m%d_%H%M%S).out"
-EXTRA=(); [ -n "$RESUME_OF" ] && EXTRA=(--resume-run "$RESUME_OF")
-setsid nohup "$D/.venv/bin/python" -u "$D/s3s3-archiver-s3tables-mp.py" \\
-    {run} ${{EXTRA[@]+"${{EXTRA[@]}}"}} > "$OUT" 2>&1 < /dev/null &
-PID=$!; sleep 5
-echo "Started (pid $PID).  Follow:  tail -f $OUT"
-grep -m1 -o "run_id=[^,]*" "$OUT" || true
-echo "Stop cleanly: kill -INT $PID.  Continue a stopped run: paste again with RESUME_OF=<run id>."
-SFA_EOF
-"""
+        return R.ec2_script(cfg, ver, "s3s3-archiver-s3tables-mp.py", args,
+                            title="S3-source run (reads stay in the Region: no data transfer out)")
 
     def _copy_script(self):
         self.btn_copy.setEnabled(False); self.btn_copy.setText("Preparing…")
@@ -971,7 +927,8 @@ SFA_EOF
         else:
             import shlex
             cfg = self.s.config()
-            shown = [f"<table bucket {cfg.table_bucket}>" if c == cfg.table_bucket_arn else c for c in cmd[1:]]
+            shown = ["python3", tilde(cmd[2])] + [f"<table bucket {cfg.table_bucket}>" if c == cfg.table_bucket_arn
+                                                  else c for c in __import__("remote").gui_only(cmd[3:])]
             self.preview.setPlainText(mask(" ".join(shlex.quote(c) for c in shown)))
 
     def _accept(self):
@@ -1828,9 +1785,15 @@ class ArchiveDialog(QDialog):
         f.addRow("Command", self.preview)
         bb = QDialogButtonBox()
         self.btn_run = bb.addButton("Start archiving", QDialogButtonBox.AcceptRole)
+        self.btn_copy = bb.addButton("Copy script for EC2", QDialogButtonBox.ActionRole)
+        self.btn_copy.setToolTip("Copy a shell script with these settings: paste it into a terminal on an "
+                                 "EC2 instance that has this data mounted (NFS, EFS, FSx…) to run it there")
+        self.btn_copy.clicked.connect(self._copy_script)
         bb.addButton(QDialogButtonBox.Cancel)
         bb.accepted.connect(self._accept); bb.rejected.connect(self.reject)
         f.addRow(bb)
+        self.copy_note = QLabel(""); self.copy_note.setWordWrap(True); self.copy_note.setStyleSheet("color: #2d6a2d")
+        f.addRow("", self.copy_note)
 
         (self.src_rep if (retry_from or not paths) else self.src_sel).setChecked(True)
         self.src_sel.setEnabled(bool(paths))
@@ -1980,9 +1943,65 @@ class ArchiveDialog(QDialog):
             self.preview.setPlainText("⚠ " + err)
         else:
             import shlex
-            shown = [f"<table bucket {cfg.table_bucket}>" if c == cfg.table_bucket_arn else c
-                     for c in cmd[1:]]
+            shown = ["python3", tilde(cmd[2])] + [f"<table bucket {cfg.table_bucket}>" if c == cfg.table_bucket_arn
+                                                  else c for c in __import__("remote").gui_only(cmd[3:])]
             self.preview.setPlainText(mask(" ".join(shlex.quote(c) for c in shown)))
+
+    def ec2_script(self):
+        """Paste-ready script that runs this local-disk archive on an EC2
+        instance. The paths are this computer's, so the script starts with one
+        SRC_PATH line to point at the same data on the instance; walk paths
+        follow it. A file-list report is uploaded and fetched by the script.
+        Blocking: call off the UI thread."""
+        import shlex
+        import remote as R
+        cmd, err = self.command()
+        if err:
+            raise ValueError(err)
+        cfg = self.s.config()
+        r = R.Remote(cfg)
+        ver = r.upload_runner()
+        q = shlex.quote
+        args = R.gui_only(cmd[3:])
+        base = args[args.index("--src-path") + 1]
+        setup = [f"SRC_PATH={q(base)}   # <- the same data on THIS instance (e.g. an NFS/EFS/FSx mount): change it",
+                 '[ -d "$SRC_PATH" ] || { echo "SRC_PATH not found on this instance: $SRC_PATH"; '
+                 'echo "Edit the SRC_PATH line and paste again."; exit 1; }']
+        out, i = [], 0
+        while i < len(args):
+            a = args[i]
+            if a == "--src-path":
+                out += [a, R.Raw('"$SRC_PATH"')]; i += 2; continue
+            if a == "--walk-path":
+                rel = os.path.relpath(args[i + 1], base)
+                out += [a, R.Raw('"$SRC_PATH"' + ("" if rel == "." else "/" + q(rel)))]; i += 2; continue
+            if a == "--input-file":
+                name = os.path.basename(args[i + 1])
+                key = f"_sfa/jobs/manual-{datetime.now():%Y%m%d_%H%M%S}/{name}"
+                r.s3.upload_file(args[i + 1], cfg.bucket, key)
+                setup += ["# the file list was uploaded from this computer; its paths are read relative to SRC_PATH",
+                          f'mkdir -p "$HOME/sfa-work" && aws s3 cp --only-show-errors {q(f"s3://{cfg.bucket}/{key}")} '
+                          f'"$HOME/sfa-work/"{q(name)} --region {q(cfg.region)}']
+                out += [a, R.Raw('"$HOME/sfa-work/"' + q(name))]; i += 2; continue
+            out.append(a); i += 1
+        return R.ec2_script(cfg, ver, "fss3-archiver-s3tables-mp.py", out, setup, title="local-disk run")
+
+    def _copy_script(self):
+        self.btn_copy.setEnabled(False); self.btn_copy.setText("Preparing…")
+
+        def ok(text):
+            QApplication.clipboard().setText(text)
+            self.btn_copy.setEnabled(True); self.btn_copy.setText("Copied ✓")
+            QTimer.singleShot(4000, lambda: self.btn_copy.setText("Copy script for EC2"))
+            self.copy_note.setText("Script copied. Paste it into a terminal on an EC2 instance where this data is "
+                                   "mounted; first change the SRC_PATH line if the path differs there. The "
+                                   "instance role needs the archiver permissions and s3:GetObject on _sfa/runner/*.")
+
+        def fail(m):
+            self.btn_copy.setEnabled(True); self.btn_copy.setText("Copy script for EC2")
+            self.copy_note.setText(mask(f"Could not prepare the script: {m.splitlines()[0]}"))
+
+        run_async(self, self.ec2_script, ok, fail)
 
     def _requests_hint(self):
         """'≈ N upload requests per tar' for the chosen tar size and part size."""

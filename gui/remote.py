@@ -27,7 +27,7 @@ from datetime import datetime
 import boto3
 
 ARCHIVER_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "archiver")
-RUNNER_FILES = ("archiver_core.py", "s3s3-archiver-s3tables-mp.py")
+RUNNER_FILES = ("archiver_core.py", "s3s3-archiver-s3tables-mp.py", "fss3-archiver-s3tables-mp.py")
 try:                     # the same dependency list as archiver/requirements.txt
     with open(os.path.join(ARCHIVER_DIR, "requirements.txt")) as _f:
         REQUIREMENTS = _f.read()
@@ -35,6 +35,76 @@ except OSError:
     REQUIREMENTS = "pyiceberg[pyarrow,pyiceberg-core]>=0.11\nboto3[crt]>=1.34\n"
 REMOTE_ROOT = "/opt/sfa-runner"
 REMOTE_WORK = "/var/lib/sfa"
+
+
+class Raw(str):
+    """A script argument that is already shell-quoted (e.g. "$SRC_PATH"/docs)."""
+
+
+def gui_only(args):
+    """Drop what only the GUI needs: the progress pipe and the local AWS
+    profile (on EC2 the instance role is used)."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == "--progress":
+            continue
+        if a == "--profile-name":
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
+def ec2_script(cfg, ver, script, args, setup=(), title="run"):
+    """A paste-ready shell script that runs `script` (one of RUNNER_FILES) with
+    `args` on an EC2 instance: fetch this archiver version from the tar bucket
+    once, build a private Python 3.12 environment once, start in the background,
+    print the log / run id / how to stop and resume. `setup` lines run first
+    (variables to edit, checks, fetching an input list)."""
+    from datetime import datetime
+    q = shlex.quote
+    pairs, i = [], 0                       # one "--option value" per line
+    qa = lambda a: a if isinstance(a, Raw) else q(a)
+    while i < len(args):
+        if args[i].startswith("--") and i + 1 < len(args) and not str(args[i + 1]).startswith("--"):
+            pairs.append(f"{args[i]} {qa(args[i + 1])}"); i += 2
+        else:
+            pairs.append(qa(args[i])); i += 1
+    run = " \\\n    ".join(pairs)
+    pre = "\n".join(setup)
+    return f"""bash <<'SFA_EOF'
+# Small Files Archiver: {title}, copied from the GUI on {datetime.now():%Y-%m-%d %H:%M}.
+# Paste into a shell on an EC2 instance in {cfg.region}.
+set -eu
+RESUME_OF=""     # to continue a stopped run, paste this again with its run id here
+{pre}
+D="$HOME/sfa-runner/{ver}"; W="$HOME/sfa-work"
+if [ ! -f "$D/.ready" ]; then       # first time only: this archiver version + a private Python 3.12
+  mkdir -p "$D"
+  aws s3 cp --recursive --only-show-errors {q(f"s3://{cfg.bucket}/_sfa/runner/{ver}/")} "$D/" --region {q(cfg.region)}
+  UV=$(command -v uv || echo "$HOME/.local/bin/uv")
+  [ -x "$UV" ] || {{ curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null; UV="$HOME/.local/bin/uv"; }}
+  "$UV" venv --quiet --python 3.12 "$D/.venv"
+  "$UV" pip install --quiet --only-binary :all: --python "$D/.venv/bin/python" -r "$D/requirements.txt"
+  touch "$D/.ready"
+fi
+mkdir -p "$W" && cd "$W"
+OUT="$W/archiver-$(date +%Y%m%d_%H%M%S).out"
+EXTRA=(); [ -n "$RESUME_OF" ] && EXTRA=(--resume-run "$RESUME_OF")
+setsid nohup "$D/.venv/bin/python" -u "$D/{script}" \\
+    {run} ${{EXTRA[@]+"${{EXTRA[@]}}"}} > "$OUT" 2>&1 < /dev/null &
+PID=$!
+for _ in $(seq 1 60); do grep -q "run_id=" "$OUT" 2>/dev/null && break; kill -0 $PID 2>/dev/null || break; sleep 1; done
+RID=$(grep -m1 -o "run_id=[^,]*" "$OUT" | cut -d= -f2 || true)
+if ! kill -0 $PID 2>/dev/null && [ -z "$RID" ]; then echo "The archiver stopped right away:"; tail -n 20 "$OUT"; exit 1; fi
+echo "Started (pid $PID), run id ${{RID:-<see the log>}}."
+echo "Follow:  tail -f $OUT"
+echo "Stop cleanly:  kill -INT $PID.   Continue a stopped run: paste again with RESUME_OF=${{RID:-<run id>}}."
+SFA_EOF
+"""
 
 
 class Remote:
