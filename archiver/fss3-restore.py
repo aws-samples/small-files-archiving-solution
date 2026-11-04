@@ -84,10 +84,13 @@ def lookup_offsets(region, table_bucket_arn, namespace, table_name,
     catalog = load_catalog("s3tables", **props)
     table = catalog.load_table(f"{namespace}.{table_name}")
 
+    fields = ["tar_key", "source_key", "byte_start", "byte_end", "md5", "filesize",
+              "archive_ts"]
+    cols = set(table.schema().column_names)
+    fields += [c for c in ("checksum_algorithm", "checksum") if c in cols]
     rows = (table.scan(
                 row_filter=EqualTo("source_key", source_key),
-                selected_fields=("tar_key", "source_key", "byte_start",
-                                 "byte_end", "md5", "filesize", "archive_ts"))
+                selected_fields=tuple(fields))
             .to_arrow().to_pylist())
 
     if not rows:
@@ -139,6 +142,8 @@ def restore_range(s3, tar_bucket, tar_key, byte_start, byte_end,
     # (uncompressed) tar read of the first member is sufficient.
     with tarfile.open(fileobj=io.BytesIO(chunk), mode="r:") as tf:
         member = tf.next()
+        if member is not None and not member.isfile():
+            raise SystemExit(f"ERROR: tar member {member.name!r} is not a regular file")
         if member is None:
             raise SystemExit(
                 "ERROR: no tar member found in the fetched byte range; the "
@@ -161,9 +166,28 @@ def write_output(data, out, out_dir, member_name):
         if safe_rel.startswith(".." + os.sep) or safe_rel == "..":
             raise SystemExit(f"ERROR: unsafe member name {member_name!r}")
         dest = os.path.join(out_dir, safe_rel)
-    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-    with open(dest, "wb") as f:
-        f.write(data)
+    parent = os.path.dirname(os.path.abspath(dest))
+    os.makedirs(parent, exist_ok=True)
+    if out_dir and not out:
+        root = os.path.realpath(out_dir)
+        real = os.path.realpath(parent)
+        if not (real == root or real.startswith(root + os.sep)):
+            raise SystemExit(f"ERROR: {parent} resolves outside --out-dir (symlinked folder?)")
+    # fresh temp file (no following a planted symlink), then an atomic rename
+    tmp = os.path.join(parent, f".{os.path.basename(dest)}.restoring-{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        old = os.umask(0); os.umask(old)
+        os.chmod(tmp, 0o666 & ~old)
+        os.replace(tmp, dest)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return dest
 
 
@@ -198,10 +222,10 @@ def main():
     l.add_argument("--namespace", default="small_files_archive")
     l.add_argument("--table-name", default="tar_manifest")
 
-    p.add_argument("--verify-md5", nargs="?", const=True, default=False,
-                   help="verify the extracted bytes against md5. In LOOKUP mode "
-                        "pass the flag alone to use the manifest md5; in either "
-                        "mode pass --verify-md5 <hex> to check an explicit value")
+    p.add_argument("--verify-md5", "--verify", nargs="?", const=True, default=False,
+                   help="verify the extracted bytes. In LOOKUP mode pass the flag "
+                        "alone to use the manifest's CRC64NVME (or MD5 for older rows); "
+                        "in either mode pass --verify-md5 <hex> to check an explicit MD5")
     args = p.parse_args()
 
     if not args.out and not args.out_dir:
@@ -220,6 +244,7 @@ def main():
     session = boto3.Session(profile_name=args.profile_name)
     expected_name = None
     manifest_md5 = None
+    manifest_crc = None
 
     if lookup:
         if not (args.region and args.table_bucket_arn):
@@ -230,6 +255,7 @@ def main():
         tar_key = row["tar_key"]
         byte_start, byte_end = row["byte_start"], row["byte_end"]
         manifest_md5 = row.get("md5")
+        manifest_crc = row.get("checksum") if (row.get("checksum_algorithm") or "").upper() == "CRC64NVME" else None
         expected_name = args.source_key
         print(f"manifest: {args.source_key} -> s3://{args.tar_bucket}/{tar_key} "
               f"bytes {byte_start}-{byte_end}", file=sys.stderr)
@@ -246,6 +272,16 @@ def main():
     name, data = restore_range(s3, args.tar_bucket, tar_key,
                                byte_start, byte_end, expected_name)
 
+    # CRC64NVME from the manifest when present (S3's encoding)
+    if args.verify_md5 is True and manifest_crc:
+        import base64
+        from awscrt import checksums
+        got = base64.b64encode(checksums.crc64nvme(data).to_bytes(8, "big")).decode()
+        if got != manifest_crc:
+            raise SystemExit(f"ERROR: CRC64NVME mismatch: expected {manifest_crc}, got {got}")
+        print(f"CRC64NVME OK ({got})", file=sys.stderr)
+        args.verify_md5 = False            # done; skip the MD5 branch below
+
     # Resolve which md5 to check against.
     expected_md5 = None
     if args.verify_md5 is True:            # bare --verify-md5
@@ -258,7 +294,7 @@ def main():
         expected_md5 = args.verify_md5
 
     if expected_md5:
-        got = hashlib.md5(data).hexdigest()
+        got = hashlib.md5(data, usedforsecurity=False).hexdigest()
         if got != expected_md5:
             raise SystemExit(
                 f"ERROR: md5 mismatch: expected {expected_md5}, got {got}")

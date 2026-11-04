@@ -7,7 +7,7 @@ Small Files Archiver -- desktop GUI (PySide6).
     Bottom: monitoring pane -- per-job progress, per-tar bundling / uploading
             bars, log; overall progress in the status bar
 
-Archive (left -> right) runs ../fss3-archiver-s3tables-mp.py as a subprocess
+Archive (left -> right) runs ../archiver/fss3-archiver-s3tables-mp.py as a subprocess
 with --progress and renders its JSON snapshots. Restore (right -> left) runs
 backend.RestoreEngine in a thread: coalesced byte-range GETs, MD5 verified.
 
@@ -34,13 +34,13 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QHeaderView, QDialog, QFormLayout, QDialogButtonBox,
     QSpinBox, QComboBox, QCheckBox, QMessageBox, QAbstractItemView, QStyle,
     QFileDialog, QGroupBox, QRadioButton, QButtonGroup, QToolButton, QSizePolicy,
-    QFileIconProvider)
+    QFileIconProvider, QInputDialog)
 
 import backend
-from backend import Config, Manifest, RestoreEngine, human, mask
+from backend import Config, Manifest, RestoreEngine, human, mask, tilde
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ARCHIVER = HERE.parent / "fss3-archiver-s3tables-mp.py"
+DEFAULT_ARCHIVER = HERE.parent / "archiver" / "fss3-archiver-s3tables-mp.py"
 PROGRESS_TAG = "@@PROGRESS "
 STORAGE_CLASSES = ["STANDARD", "GLACIER_IR", "STANDARD_IA", "INTELLIGENT_TIERING",
                    "GLACIER", "DEEP_ARCHIVE"]
@@ -130,10 +130,14 @@ class Settings:
                       table_name=self.get("table_name", "tar_manifest") or "tar_manifest")
 
     def archiver(self):
-        return self.get("archiver", str(DEFAULT_ARCHIVER)) or str(DEFAULT_ARCHIVER)
+        # a saved path that no longer exists (e.g. the repo was reorganized)
+        # falls back to the archiver shipped next to this GUI
+        p = self.get("archiver", "") or ""
+        return p if p and os.path.isfile(p) else str(DEFAULT_ARCHIVER)
 
     def workdir(self):
-        return self.get("workdir", str(HERE.parent)) or str(HERE.parent)
+        p = self.get("workdir", "") or ""
+        return p if p and os.path.isdir(p) else str(HERE.parent)
 
     def page_size(self):
         return int(self.get("page_size", 5000) or 5000)
@@ -151,7 +155,10 @@ class SettingsDialog(QDialog):
         self.w = {}
 
         def line(k, label, ph="", default=""):
-            e = QLineEdit(mask(self.s.get(k, default)))   # ~/… instead of the home path
+            v = self.s.get(k, default)
+            # real values (a bucket name may contain 12 digits); paths only are
+            # shown as ~/… and expanded again on Save
+            e = QLineEdit(tilde(v) if k in ("archiver", "workdir") else v)
             e.setPlaceholderText(ph)
             e.setMinimumWidth(460)
             f.addRow(label, e)
@@ -165,8 +172,8 @@ class SettingsDialog(QDialog):
         line("namespace", "Namespace", "small_files_archive", "small_files_archive")
         line("table_name", "Manifest table", "tar_manifest", "tar_manifest")
         f.addRow(QLabel("<b>Advanced</b>"))
-        line("archiver", "Archiver script", mask(str(DEFAULT_ARCHIVER)), str(DEFAULT_ARCHIVER))
-        line("workdir", "Working dir (logs/)", mask(str(HERE.parent)), str(HERE.parent))
+        line("archiver", "Archiver script", tilde(str(DEFAULT_ARCHIVER)), str(DEFAULT_ARCHIVER))
+        line("workdir", "Working dir (logs/)", tilde(str(HERE.parent)), str(HERE.parent))
         self.page = QSpinBox(); self.page.setRange(100, 1_000_000); self.page.setSingleStep(1000)
         self.page.setValue(self.s.page_size())
         f.addRow("Files per folder page", self.page)
@@ -338,7 +345,7 @@ class ArchiveModel(QAbstractTableModel):
     COLS = {
         "files":   ["Name", "Size", "Files", "Archived", "Tar object", "Byte range"],
         "tars":    ["Name", "Size", "Storage class", "Last modified"],
-        "members": ["Path in archive", "Size", "Archived", "Byte range", "MD5"],
+        "members": ["Path in archive", "Size", "Archived", "Byte range", "Checksum"],
     }
 
     def __init__(self, parent=None):
@@ -410,11 +417,13 @@ class ArchiveModel(QAbstractTableModel):
         if self.mode == "members":
             if role == Qt.DisplayRole:
                 return [it["source_key"], human(it["filesize"]), fmt_ts(it["archive_ts"]),
-                        self._range(it), it.get("md5") or ""][c]
+                        self._range(it), it.get("checksum") or it.get("md5") or ""][c]
             if role == Qt.DecorationRole and c == 0:
                 return self.icon_file
             if role == Qt.ToolTipRole:
-                return f"{it['source_key']}\nmd5: {it.get('md5') or '-'}"
+                return (f"{it['source_key']}\n"
+                        + (f"CRC64NVME: {it['checksum']}\n" if it.get("checksum") else "")
+                        + f"MD5: {it.get('md5') or '-'}")
             return None
         # files mode
         isdir = kind == "dir"
@@ -454,6 +463,533 @@ def selection_label(kind, path):
     return "/" + path
 
 
+class S3SourcePane(QWidget):
+    """Browse a source S3 bucket (one prefix level at a time, paged)."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.s = settings
+        self.bucket = ""
+        self.cwd = ""
+        self._token = None
+        self._req = 0
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Bucket:"))
+        self.buckets = QComboBox(); self.buckets.setEditable(True); self.buckets.setMinimumContentsLength(18)
+        self.buckets.setToolTip("Buckets in the Region from Settings; you can also type a name")
+        self.btn_reload = QToolButton(); self.btn_reload.setText("⟳"); self.btn_reload.setToolTip("Reload bucket list")
+        top.addWidget(self.buckets, 1); top.addWidget(self.btn_reload)
+        self.bar = PathBar("S3")
+        self.model = ArchiveModel(self)
+        self.model.set_items([], mode="tars")
+        self.view = QTableView(); self.view.setModel(self.model)
+        self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.view.verticalHeader().setVisible(False); self.view.verticalHeader().setDefaultSectionSize(22)
+        self.view.setShowGrid(False); self.view.setWordWrap(False)
+        self.view.setTextElideMode(Qt.ElideMiddle)
+        hh = self.view.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.Interactive); hh.setStretchLastSection(True)
+        self.model.modelReset.connect(lambda: (hh.resizeSection(0, max(220, self.view.viewport().width() - 340)),
+                                               hh.resizeSection(1, 85), hh.resizeSection(2, 110)))
+        foot = QHBoxLayout()
+        self.info = QLabel(""); self.info.setWordWrap(True)
+        self.btn_more = QPushButton("Show more"); self.btn_more.setVisible(False)
+        foot.addWidget(self.info, 1); foot.addWidget(self.btn_more)
+        v.addLayout(top); v.addWidget(self.bar); v.addWidget(self.view, 1); v.addLayout(foot)
+        self.buckets.activated.connect(lambda *_: self.open_bucket(self.buckets.currentText().strip()))
+        self.buckets.lineEdit().returnPressed.connect(lambda: self.open_bucket(self.buckets.currentText().strip()))
+        self.btn_reload.clicked.connect(self.load_buckets)
+        self.bar.navigate.connect(self._navigate_text)
+        self.bar.up.connect(self._up)
+        self.view.doubleClicked.connect(self._open)
+        self.btn_more.clicked.connect(lambda: self._list(append=True))
+        self._loaded = False
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._loaded:
+            self._loaded = True
+            self.load_buckets()
+
+    def _store(self, bucket):
+        cfg = self.s.config()
+        return backend.TarStore(backend.Config(profile=cfg.profile, region=cfg.region, bucket=bucket))
+
+    def load_buckets(self):
+        cfg = self.s.config()
+        self.info.setText("Listing buckets…")
+
+        def ok(names):
+            cur = self.s.get("last_src_bucket", "")
+            self.buckets.blockSignals(True)
+            self.buckets.clear(); self.buckets.addItems(names)
+            if cur in names:
+                self.buckets.setCurrentText(cur)
+            self.buckets.blockSignals(False)
+            self.info.setText(f"{len(names)} buckets in {cfg.region}. Pick the source bucket.")
+            if cur in names:
+                self.open_bucket(cur, self.s.get("last_src_prefix", ""))
+
+        run_async(self, lambda: backend.Provisioner(cfg.profile, cfg.region).list_buckets(), ok,
+                  lambda m: self.info.setText(mask(f"Could not list buckets: {m.splitlines()[0]}")))
+
+    def open_bucket(self, bucket, prefix=""):
+        if not bucket:
+            return
+        self.bucket = bucket
+        self.s.set("last_src_bucket", bucket)
+        self.cd(prefix)
+
+    def cd(self, prefix):
+        prefix = prefix.lstrip("/")
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        self.cwd = prefix
+        self.s.set("last_src_prefix", prefix)
+        self.bar.set_path(f"s3://{self.bucket}/{prefix}")
+        self._token = None
+        self._list(append=False)
+
+    def _list(self, append):
+        if not self.bucket:
+            return
+        self._req += 1
+        req, prefix = self._req, self.cwd
+        self.info.setText("Listing…")
+
+        def ok(res):
+            if req != self._req:
+                return
+            dirs, objs, token = res
+            for o in objs:
+                o["is_tar"] = False        # source objects: plain file icon
+            self._token = token
+            if append:
+                self.model.append(dirs + objs)
+            else:
+                self.model.set_items(dirs + objs, mode="tars")
+            items = self.model.items
+            nobj = sum(1 for i in items if i["kind"] == "object")
+            size = sum(i["size"] for i in items if i["kind"] == "object")
+            self.info.setText(f"{sum(1 for i in items if i['kind'] == 'prefix'):,} folders, {nobj:,} objects"
+                              f" · {human(size)} listed" + (" · more available" if token else ""))
+            self.btn_more.setVisible(bool(token))
+
+        run_async(self, self._store(self.bucket).list, ok,
+                  lambda m: self.info.setText(mask(f"Listing failed: {m.splitlines()[0]}")),
+                  prefix, token=self._token if append else None)
+
+    def _navigate_text(self, text):
+        t = text.strip()
+        if t.startswith("s3://"):
+            b, _, p = t[5:].partition("/")
+            if b and b != self.bucket:
+                self.buckets.setCurrentText(b)
+                return self.open_bucket(b, p)
+            t = p
+        self.cd(t)
+
+    def _up(self):
+        parent = posixpath.dirname(self.cwd.rstrip("/"))
+        self.cd(parent + "/" if parent else "")
+
+    def _open(self, idx):
+        it = self.model.items[idx.row()]
+        if it["kind"] == "prefix":
+            self.cd(it["path"])
+
+    def selected(self):
+        return [self.model.items[i.row()] for i in self.view.selectionModel().selectedRows(0)]
+
+
+class SourcePane(QWidget):
+    """Left pane: Local disk | S3 bucket."""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self); v.setContentsMargins(4, 4, 4, 4)
+        sw = QHBoxLayout(); sw.setContentsMargins(0, 0, 0, 0)
+        self.btn_local = QToolButton(); self.btn_local.setText("Local disk")
+        self.btn_s3 = QToolButton(); self.btn_s3.setText("S3 bucket")
+        grp = QButtonGroup(self); grp.setExclusive(True)
+        sw.addWidget(QLabel("Source:"))
+        for b in (self.btn_local, self.btn_s3):
+            b.setCheckable(True); grp.addButton(b); sw.addWidget(b)
+        sw.addStretch(1)
+        self.local = LocalPane(settings)
+        self.local.layout().setContentsMargins(0, 0, 0, 0)
+        self.s3 = S3SourcePane(settings)
+        from PySide6.QtWidgets import QStackedWidget
+        self.stack = QStackedWidget(); self.stack.addWidget(self.local); self.stack.addWidget(self.s3)
+        v.addLayout(sw); v.addWidget(self.stack, 1)
+        self.btn_local.clicked.connect(lambda: self.set_mode("local"))
+        self.btn_s3.clicked.connect(lambda: self.set_mode("s3"))
+        self.set_mode(settings.get("last_source", "local") or "local")
+        self.s = settings
+
+    def set_mode(self, mode):
+        self.mode = mode
+        self.btn_local.setChecked(mode == "local"); self.btn_s3.setChecked(mode == "s3")
+        self.stack.setCurrentWidget(self.s3 if mode == "s3" else self.local)
+        if hasattr(self, "s"):
+            self.s.set("last_source", mode)
+
+
+class S3ArchiveDialog(QDialog):
+    """Archive from an S3 bucket: a selected folder (kept by name), the current
+    folder, or selected objects."""
+
+    def __init__(self, bucket, cwd, items, settings, parent=None, manifest=None):
+        super().__init__(parent)
+        self.setWindowTitle("Archive from S3")
+        self.s, self.manifest, self.bucket, self.cwd = settings, manifest, bucket, cwd
+        folders = [i for i in items if i["kind"] == "prefix"]
+        objects = [i for i in items if i["kind"] == "object"]
+        self.err0 = None
+        if folders and (objects or len(folders) > 1):
+            self.err0 = "Select one folder, or objects only (several folders: archive them one by one)."
+        if folders:
+            self.mode, self.list_prefix = "folder", folders[0]["path"]
+            parent_ = posixpath.dirname(self.list_prefix.rstrip("/"))
+            base = parent_ + "/" if parent_ else ""
+            label = f"folder s3://{bucket}/{self.list_prefix}"
+        elif objects:
+            self.mode, self.list_prefix, base = "objects", cwd, cwd
+            self.objects = objects
+            label = f"{len(objects):,} selected object(s) in s3://{bucket}/{cwd}"
+        else:
+            self.mode, self.list_prefix = "folder", cwd
+            parent_ = posixpath.dirname(cwd.rstrip("/"))
+            base = parent_ + "/" if parent_ else ""
+            label = f"everything in s3://{bucket}/{cwd}"
+        f = QFormLayout(self)
+        f.addRow("Source", QLabel(label))
+        self.base = QLineEdit(base)
+        self.base.setToolTip("Object keys are stored relative to this prefix. The default keeps the "
+                             "selected folder's own name.")
+        f.addRow("Store keys relative to", self.base)
+        self.prefix = QLineEdit(self.s.get("last_prefix", "") or datetime.now().strftime("%Y%m%d"))
+        f.addRow("Destination prefix", self.prefix)
+        self.layout_cb = QComboBox()
+        self.layout_cb.addItem("One folder per run  (<prefix>/<run-id>/)", "run")
+        self.layout_cb.addItem("One folder per day  (<prefix>/<YYYYMMDD>/)", "date")
+        self.layout_cb.addItem("No subfolder  (<prefix>/)", "flat")
+        self.layout_cb.setCurrentIndex(max(0, self.layout_cb.findData(self.s.get("last_layout", "run") or "run")))
+        f.addRow("Tar folders", self.layout_cb)
+        self.incr = QCheckBox("Incremental — only objects modified since the last successful run of this source")
+        self.incr.setEnabled(self.mode == "folder")
+        self.incr_lbl = QLabel(""); self.incr_lbl.setWordWrap(True); self.incr_lbl.setStyleSheet("color: gray")
+        f.addRow("", self.incr); f.addRow("", self.incr_lbl)
+        g = QHBoxLayout()
+        self.by_size = QRadioButton("Max tar size"); self.by_count = QRadioButton("Max files per tar")
+        self.by_size.setChecked(True)
+        self.size = QComboBox(); self.size.setEditable(True)
+        self.size.addItems(["20MB", "64MB", "256MB", "512MB", "1GB", "4GB"])
+        self.size.setCurrentText(self.s.get("last_size", "256MB") or "256MB")
+        self.count = QSpinBox(); self.count.setRange(1, 10_000_000); self.count.setValue(1000)
+        g.addWidget(self.by_size); g.addWidget(self.size); g.addSpacing(16); g.addWidget(self.by_count); g.addWidget(self.count)
+        f.addRow("Bundling", g)
+        self.part = QComboBox(); self.part.addItems(["8MB", "16MB", "32MB", "64MB"])
+        self.part.setCurrentText(self.s.get("last_part", "32MB") or "32MB")
+        f.addRow("Upload part size", self.part)
+        hw = QHBoxLayout()
+        self.workers = QSpinBox(); self.workers.setRange(1, 512); self.workers.setValue(os.cpu_count() or 4)
+        self.gets = QSpinBox(); self.gets.setRange(1, 4096); self.gets.setValue(256)
+        self.gets.setToolTip("Concurrent source GETs in total, spread over the worker processes. Small "
+                             "objects make the run GET-bound.")
+        self.lists = QSpinBox(); self.lists.setRange(1, 256); self.lists.setValue(16)
+        hw.addWidget(self.workers); hw.addWidget(QLabel("GET concurrency")); hw.addWidget(self.gets)
+        hw.addWidget(QLabel("list threads")); hw.addWidget(self.lists)
+        f.addRow("Worker processes", hw)
+        self.sclass = QComboBox(); self.sclass.addItems(STORAGE_CLASSES)
+        self.sclass.setCurrentText(self.s.get("last_sclass", "STANDARD") or "STANDARD")
+        f.addRow("Tar storage class", self.sclass)
+        self.verify = QCheckBox("Compare each object's checksum with the one S3 stored for it")
+        self.verify.setChecked(True)
+        self.md5 = QCheckBox("Also store MD5 (CRC64NVME is always stored)"); self.md5.setChecked(True)
+        self.dirindex = QCheckBox("Directory index (fast folder browsing at scale)"); self.dirindex.setChecked(True)
+        for w in (self.verify, self.md5, self.dirindex):
+            f.addRow("", w)
+        ro = QHBoxLayout()
+        self.run_on = QComboBox(); self.run_on.addItem("This computer", None)
+        self.run_on.setToolTip("Run the archiver here, or on an EC2 instance through AWS Systems Manager "
+                               "(the data then never leaves AWS)")
+        self.btn_prep = QPushButton("Prepare instance"); self.btn_prep.setEnabled(False)
+        self.btn_prep.setToolTip("Install this archiver version on the instance (otherwise done at start)")
+        ro.addWidget(self.run_on, 1); ro.addWidget(self.btn_prep)
+        f.addRow("Run on", ro)
+        self.warn = QLabel(""); self.warn.setWordWrap(True)
+        f.addRow("", self.warn)
+        self.run_on.currentIndexChanged.connect(self._sync_run_on)
+        self.btn_prep.clicked.connect(self._prepare)
+        self._sync_run_on()
+        run_async(self, lambda: __import__("remote").Remote(self.s.config()).list_instances(),
+                  self._fill_instances, lambda m: None)
+        self.preview = QPlainTextEdit(); self.preview.setReadOnly(True); self.preview.setMaximumHeight(110)
+        self.preview.setFont(QFont("Menlo", 10))
+        f.addRow("Command", self.preview)
+        bb = QDialogButtonBox()
+        self.btn_run = bb.addButton("Start archiving", QDialogButtonBox.AcceptRole)
+        self.btn_copy = bb.addButton("Copy script for EC2", QDialogButtonBox.ActionRole)
+        self.btn_copy.setToolTip("Copy a shell script with these settings: paste it into a terminal on "
+                                 "an EC2 instance to run the archive there yourself")
+        self.btn_copy.clicked.connect(self._copy_script)
+        bb.addButton(QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._accept); bb.rejected.connect(self.reject)
+        f.addRow(bb)
+        for w in (self.base, self.prefix):
+            w.textChanged.connect(self._refresh)
+        for w in (self.size, self.part, self.sclass):
+            w.currentTextChanged.connect(self._refresh)
+        self.layout_cb.currentIndexChanged.connect(self._refresh)
+        for w in (self.count, self.workers, self.gets, self.lists):
+            w.valueChanged.connect(self._refresh)
+        for w in (self.by_size, self.by_count, self.verify, self.md5, self.dirindex, self.incr):
+            w.toggled.connect(self._refresh)
+        self._refresh()
+        self._lookup_last_run()
+
+    def _fill_instances(self, items):
+        last = self.s.get("last_instance", "")
+        for it in items:
+            cpu = f" · {it['vcpus']} vCPU" if it.get("vcpus") else ""
+            self.run_on.addItem(f"EC2 {it['name'] or '(no name)'}  ·  {it['id']}  ·  {it['type']}{cpu}", it)
+            if it["id"] == last:
+                self.run_on.setCurrentIndex(self.run_on.count() - 1)
+
+    def run_on_instance(self):
+        return self.run_on.currentData()
+
+    def _sync_run_on(self):
+        inst = self.run_on_instance()
+        self.btn_prep.setEnabled(inst is not None)
+        # size the run for the machine it runs on (still editable)
+        if inst is not None and inst.get("vcpus"):
+            w, g = __import__("remote").Remote.suggested(inst["vcpus"])
+            self.workers.setValue(w); self.gets.setValue(g)
+            self.workers.setToolTip(f"Suggested for {inst['type']} ({inst['vcpus']} vCPU): vCPU + 16, at most 2 per vCPU")
+        elif inst is None:
+            self.workers.setValue(os.cpu_count() or 4); self.gets.setValue(256)
+            self.workers.setToolTip("")
+        if inst is None:
+            self.warn.setText("<small>Running here reads every object over the internet: S3 data transfer "
+                              "out is charged per GB. Pick an EC2 instance in the bucket's Region to keep "
+                              "the reads inside AWS — free and much faster.</small>")
+            self.warn.setStyleSheet("color: #a05a00")
+        else:
+            self.warn.setText("<small>Runs on the instance through AWS Systems Manager: reads stay inside "
+                              "AWS (no data transfer out), progress shows here, and the run continues if "
+                              "this computer sleeps. Use a public subnet or an S3 Gateway VPC Endpoint — "
+                              "not a NAT Gateway, which bills every GB.</small>")
+            self.warn.setStyleSheet("color: #2d6a2d")
+
+    def _prepare(self):
+        inst = self.run_on_instance()
+        if inst is None:
+            return
+        self.btn_prep.setEnabled(False); self.btn_prep.setText("Preparing…")
+
+        def done(msg):
+            self.btn_prep.setText("Prepared ✓"); self.warn.setText(f"<small>{msg}</small>")
+
+        def fail(msg):
+            self.btn_prep.setText("Prepare instance"); self.btn_prep.setEnabled(True)
+            self.warn.setText(f"<small>Prepare failed: {mask(msg.splitlines()[0])}</small>")
+
+        run_async(self, lambda: __import__("remote").Remote(self.s.config()).prepare(inst["id"]),
+                  done, fail)
+
+    def _lookup_last_run(self):
+        if self.mode != "folder" or self.manifest is None:
+            return
+        try:
+            sid = backend.archiver_module(self.s.archiver()).source_id_for(
+                f"s3://{self.bucket}/{self.list_prefix}", [], None)
+        except Exception:
+            return
+        self.incr_lbl.setText("Looking up the last run of this source…")
+
+        def ok(r):
+            self.incr_lbl.setText(
+                "No previous successful run of this exact source: the first incremental run archives "
+                "everything." if r is None else
+                f"Last successful run: {fmt_ts(r['start_ts'])} ({r['mode']}, {r['files']:,} objects). "
+                f"Incremental archives objects modified after it.")
+
+        run_async(self, self.manifest.last_run, ok, lambda m: self.incr_lbl.setText(""), sid)
+
+    def _script(self):
+        return str(Path(self.s.archiver()).with_name("s3s3-archiver-s3tables-mp.py"))
+
+    # -- manual run on EC2 ------------------------------------------------------
+    def kit_args(self):
+        """The archiver arguments of this dialog for a run on EC2: no local
+        progress pipe, no local AWS profile (the instance role is used)."""
+        cmd, err = self.command()
+        if err:
+            return None, err
+        out, skip = [], False
+        for a in cmd[3:]:
+            if skip:
+                skip = False
+                continue
+            if a == "--progress":
+                continue
+            if a == "--profile-name":
+                skip = True
+                continue
+            out.append(a)
+        return out, None
+
+    def ec2_script(self):
+        """Upload this archiver version (and a selection list) to the tar bucket,
+        then return a paste-ready shell script that runs these settings on an
+        EC2 instance. Blocking: call off the UI thread."""
+        import shlex
+        import remote as R
+        args, err = self.kit_args()
+        if err:
+            raise ValueError(err)
+        cfg = self.s.config()
+        r = R.Remote(cfg)
+        ver = r.upload_runner()
+        if "--src-manifest" in args:            # selected objects: the list goes to S3 too
+            i = args.index("--src-manifest") + 1
+            key = f"_sfa/jobs/manual-{datetime.now():%Y%m%d_%H%M%S}/selection.txt"
+            r.s3.upload_file(args[i], cfg.bucket, key)
+            args[i] = f"s3://{cfg.bucket}/{key}"
+        q = shlex.quote
+        pairs, i = [], 0                       # one "--option value" per line
+        while i < len(args):
+            if args[i].startswith("--") and i + 1 < len(args) and not args[i + 1].startswith("--"):
+                pairs.append(f"{args[i]} {q(args[i + 1])}"); i += 2
+            else:
+                pairs.append(q(args[i])); i += 1
+        run = " \\\n    ".join(pairs)
+        return f"""bash <<'SFA_EOF'
+# Small Files Archiver: S3-source run, copied from the GUI on {datetime.now():%Y-%m-%d %H:%M}.
+# Paste into a shell on an EC2 instance in {cfg.region}, the source bucket's Region (no data transfer out).
+set -eu
+RESUME_OF=""     # to continue a stopped run, paste this again with its run id here
+D="$HOME/sfa-runner/{ver}"; W="$HOME/sfa-work"
+if [ ! -f "$D/.ready" ]; then       # first time only: this archiver version + a private Python 3.12
+  mkdir -p "$D"
+  aws s3 cp --recursive --only-show-errors {q(f"s3://{cfg.bucket}/_sfa/runner/{ver}/")} "$D/" --region {q(cfg.region)}
+  UV=$(command -v uv || echo "$HOME/.local/bin/uv")
+  [ -x "$UV" ] || {{ curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null; UV="$HOME/.local/bin/uv"; }}
+  "$UV" venv --quiet --python 3.12 "$D/.venv"
+  "$UV" pip install --quiet --only-binary :all: --python "$D/.venv/bin/python" -r "$D/requirements.txt"
+  touch "$D/.ready"
+fi
+mkdir -p "$W" && cd "$W"
+OUT="$W/archiver-$(date +%Y%m%d_%H%M%S).out"
+EXTRA=(); [ -n "$RESUME_OF" ] && EXTRA=(--resume-run "$RESUME_OF")
+setsid nohup "$D/.venv/bin/python" -u "$D/s3s3-archiver-s3tables-mp.py" \\
+    {run} ${{EXTRA[@]+"${{EXTRA[@]}}"}} > "$OUT" 2>&1 < /dev/null &
+PID=$!; sleep 5
+echo "Started (pid $PID).  Follow:  tail -f $OUT"
+grep -m1 -o "run_id=[^,]*" "$OUT" || true
+echo "Stop cleanly: kill -INT $PID.  Continue a stopped run: paste again with RESUME_OF=<run id>."
+SFA_EOF
+"""
+
+    def _copy_script(self):
+        self.btn_copy.setEnabled(False); self.btn_copy.setText("Preparing…")
+
+        def ok(text):
+            QApplication.clipboard().setText(text)
+            self.btn_copy.setEnabled(True); self.btn_copy.setText("Copied ✓")
+            QTimer.singleShot(4000, lambda: self.btn_copy.setText("Copy script for EC2"))
+            self.warn.setText("<small>Script copied. Paste it into a terminal on an EC2 instance in the "
+                              "bucket's Region (SSH, Session Manager or EC2 Instance Connect). The "
+                              "instance role needs the archiver permissions and s3:GetObject on "
+                              "_sfa/runner/* in the tar bucket.</small>")
+
+        def fail(m):
+            self.btn_copy.setEnabled(True); self.btn_copy.setText("Copy script for EC2")
+            self.warn.setText(mask(f"<small>Could not prepare the script: {m.splitlines()[0]}</small>"))
+
+        run_async(self, self.ec2_script, ok, fail)
+
+    def command(self):
+        cfg = self.s.config()
+        if self.err0:
+            return None, self.err0
+        base = self.base.text().strip().lstrip("/")
+        if base and not base.endswith("/"):
+            base += "/"
+        if not self.list_prefix.startswith(base):
+            return None, "“Store keys relative to” must be the source folder or one of its parents."
+        if not self.prefix.text().strip().strip("/"):
+            return None, "Destination prefix is required."
+        cmd = [sys.executable, "-u", self._script(), "--progress"]
+        if self.mode == "folder":
+            cmd += ["--src-s3", f"s3://{self.bucket}/{self.list_prefix}"]
+            if self.incr.isChecked():
+                cmd.append("--incremental")
+        else:
+            cmd += ["--src-manifest", self._write_uri_list(), "--src-manifest-format", "uris"]
+        cmd += ["--src-prefix", base]          # always explicit: "" means the bucket root
+        cmd += ["--dst-bucket", cfg.bucket, "--dst-prefix", self.prefix.text().strip().strip("/"),
+                "--tar-layout", self.layout_cb.currentData(), "--part-size", self.part.currentText()]
+        cmd += ["--max-size", self.size.currentText().strip()] if self.by_size.isChecked() else \
+               ["--max-files", str(self.count.value())]
+        cmd += ["--num-workers", str(self.workers.value()), "--get-concurrency", str(self.gets.value()),
+                "--list-threads", str(self.lists.value()), "--tar-storageclass", self.sclass.currentText(),
+                "--region", cfg.region, "--table-bucket-arn", cfg.table_bucket_arn,
+                "--namespace", cfg.namespace, "--table-name", cfg.table_name,
+                "--md5" if self.md5.isChecked() else "--no-md5",
+                "--dir-index" if self.dirindex.isChecked() else "--no-dir-index",
+                "--verify-source-checksum" if self.verify.isChecked() else "--no-verify-source-checksum"]
+        if cfg.profile:
+            cmd += ["--profile-name", cfg.profile]
+        return cmd, None
+
+    def _write_uri_list(self):
+        if getattr(self, "_uri_file", None):
+            return self._uri_file
+        d = os.path.join(self.s.workdir(), "logs", "s3-selections")
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        path = os.path.join(d, f"selection-{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            for o in self.objects:
+                fh.write(f"s3://{self.bucket}/{o['key']}\n")
+        self._uri_file = path
+        return path
+
+    def _refresh(self):
+        if self.mode == "objects":
+            self.preview.setPlainText(f"{len(self.objects):,} objects will be passed as a list (--src-manifest)")
+            self.btn_run.setEnabled(self.err0 is None)
+            return
+        cmd, err = self.command()
+        self.btn_run.setEnabled(err is None)
+        if err:
+            self.preview.setPlainText("⚠ " + err)
+        else:
+            import shlex
+            cfg = self.s.config()
+            shown = [f"<table bucket {cfg.table_bucket}>" if c == cfg.table_bucket_arn else c for c in cmd[1:]]
+            self.preview.setPlainText(mask(" ".join(shlex.quote(c) for c in shown)))
+
+    def _accept(self):
+        self.s.set("last_prefix", self.prefix.text().strip())
+        self.s.set("last_size", self.size.currentText())
+        self.s.set("last_sclass", self.sclass.currentText())
+        self.s.set("last_layout", self.layout_cb.currentData())
+        self.s.set("last_part", self.part.currentText())
+        inst = self.run_on_instance()
+        self.s.set("last_instance", inst["id"] if inst else "")
+        self.accept()
+
+    def title(self):
+        name = posixpath.basename(self.list_prefix.rstrip("/")) or self.bucket
+        what = f"s3 {name}" if self.mode == "folder" else f"s3 {len(self.objects):,} objects"
+        return what + (" (incremental)" if self.incr.isChecked() else "")
+
+
 class ArchivePane(QWidget):
     status = Signal(str)
 
@@ -480,9 +1016,19 @@ class ArchivePane(QWidget):
         self.hist = QComboBox()
         self.hist.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.hist.setMinimumContentsLength(16)
-        self.hist.setToolTip("Archives you have connected to. Pick one to switch to it.")
+        self.hist.setToolTip("Your archives, by name. Pick one to switch to it.")
         self.hist.activated.connect(self._switch_archive)
+        self.btn_hist_add = QToolButton(); self.btn_hist_add.setText("+")
+        self.btn_hist_add.setToolTip("Add an archive: create a new one or connect an existing one")
+        self.btn_hist_rename = QToolButton(); self.btn_hist_rename.setText("Rename")
+        self.btn_hist_remove = QToolButton(); self.btn_hist_remove.setText("Remove")
+        self.btn_hist_remove.setToolTip("Remove from this list (nothing in AWS is deleted)")
+        self.btn_hist_add.clicked.connect(self._hist_add)
+        self.btn_hist_rename.clicked.connect(self._hist_rename)
+        self.btn_hist_remove.clicked.connect(self._hist_remove)
         hr.addWidget(QLabel("Archive:")); hr.addWidget(self.hist, 1)
+        for b_ in (self.btn_hist_add, self.btn_hist_rename, self.btn_hist_remove):
+            hr.addWidget(b_)
 
         # view switch
         sw = QHBoxLayout(); sw.setContentsMargins(0, 0, 0, 0)
@@ -547,61 +1093,81 @@ class ArchivePane(QWidget):
         self._fill_history()
         self.connect_backend()
 
-    # -- archive history ----------------------------------------------------
-    HIST_KEYS = ("profile", "region", "bucket", "table_bucket", "table_bucket_arn",
-                 "namespace", "table_name")
-    HIST_MAX = 10
-
-    def _history(self):
-        try:
-            h = json.loads(self.s.get("archive_history", "[]") or "[]")
-            return [e for e in h if isinstance(e, dict) and e.get("bucket")]
-        except ValueError:
-            return []
-
-    @staticmethod
-    def _hist_label(e):
-        return (f"s3://{e['bucket']}  ·  table bucket {e.get('table_bucket') or '?'}  ·  "
-                f"{e.get('namespace')}.{e.get('table_name')}  ·  {e.get('region')}"
-                + (f"  ·  {e['profile']}" if e.get("profile") else ""))
-
-    @staticmethod
-    def _same(a, b):
-        return all((a.get(k) or "") == (b.get(k) or "") for k in
-                   ("region", "bucket", "table_bucket", "namespace", "table_name", "profile"))
+    # -- archive list ---------------------------------------------------------
+    def _registry(self):
+        from archives import ArchiveRegistry
+        return ArchiveRegistry(self.s)
 
     def _fill_history(self):
-        cur = {k: self.s.get(k, "") for k in self.HIST_KEYS}
-        cur["table_bucket"] = self.s.config().table_bucket
-        h = self._history()
-        if cur.get("bucket") and not any(self._same(e, cur) for e in h):
-            h.insert(0, cur)
+        reg = self._registry()
+        entries = reg.list()
+        cur = reg.current_name()
         self.hist.blockSignals(True)
         self.hist.clear()
-        for e in h:
-            self.hist.addItem(mask(self._hist_label(e)))
-        idx = next((i for i, e in enumerate(h) if self._same(e, cur)), -1)
-        self.hist.setCurrentIndex(idx)
+        for e in entries:
+            self.hist.addItem(e["name"])
+            tip = (f"tar bucket s3://{e['bucket']}\ntable bucket {e.get('table_bucket') or '?'}\n"
+                   f"table {e.get('namespace')}.{e.get('table_name')}\nRegion {e.get('region')}"
+                   + (f"\nprofile {e['profile']}" if e.get("profile") else ""))
+            self.hist.setItemData(self.hist.count() - 1, mask(tip), Qt.ToolTipRole)
+        self.hist.setCurrentIndex(self.hist.findText(cur) if cur else -1)
         self.hist.blockSignals(False)
-        self._hist_entries = h
+        self.btn_hist_rename.setEnabled(cur is not None)
+        self.btn_hist_remove.setEnabled(cur is not None)
 
     def _remember(self, cfg):
-        """Put the archive just connected to at the top of the history."""
-        e = {"profile": cfg.profile, "region": cfg.region, "bucket": cfg.bucket,
-             "table_bucket": cfg.table_bucket, "table_bucket_arn": cfg.table_bucket_arn,
-             "namespace": cfg.namespace, "table_name": cfg.table_name}
-        h = [x for x in self._history() if not self._same(x, e)]
-        h.insert(0, e)
-        self.s.set("archive_history", json.dumps(h[:self.HIST_MAX]))
+        """The archive just connected to stays in (or joins) the list."""
+        self._registry().add({"profile": cfg.profile, "region": cfg.region, "bucket": cfg.bucket,
+                              "table_bucket": cfg.table_bucket, "table_bucket_arn": cfg.table_bucket_arn,
+                              "namespace": cfg.namespace, "table_name": cfg.table_name})
         self._fill_history()
 
     def _switch_archive(self, index):
-        h = getattr(self, "_hist_entries", [])
-        if not (0 <= index < len(h)):
+        name = self.hist.itemText(index)
+        if not name:
             return
-        e = h[index]
-        for k in self.HIST_KEYS:
-            self.s.set(k, e.get(k, "") or "")
+        self._registry().activate(name)
+        self.cwd, self.tar_prefix, self.tar_open = "", "", None
+        self.search.clear()
+        self.connect_backend()          # checks the tables and the bucket; errors show below
+
+    def _hist_add(self):
+        w = self.window()
+        if hasattr(w, "open_wizard"):
+            w.open_wizard()
+
+    def _hist_rename(self):
+        reg = self._registry()
+        cur = reg.current_name()
+        if cur is None:
+            return
+        new, ok = QInputDialog.getText(self, "Rename archive", "Name in the archive list:", text=cur)
+        if not ok:
+            return
+        try:
+            reg.rename(cur, new)
+        except (ValueError, KeyError) as e:
+            QMessageBox.information(self, "Rename archive", str(e))
+        self._fill_history()
+
+    def _hist_remove(self):
+        reg = self._registry()
+        cur = reg.current_name()
+        if cur is None:
+            return
+        if QMessageBox.question(self, "Remove from list",
+                                f"Remove “{cur}” from the archive list?\n\nOnly the entry is removed; "
+                                f"the tars and the manifest in AWS are not touched.") != QMessageBox.Yes:
+            return
+        reg.remove(cur)
+        rest = reg.names()
+        if rest:
+            self._switch_archive_by_name(rest[0])
+        else:
+            self._fill_history()
+
+    def _switch_archive_by_name(self, name):
+        self._registry().activate(name)
         self.cwd, self.tar_prefix, self.tar_open = "", "", None
         self.search.clear()
         self.connect_backend()
@@ -1164,7 +1730,7 @@ class ArchiveDialog(QDialog):
         self.src_rep = QRadioButton("File-list report (txt / csv / tsv, .gz ok)")
         sg = QButtonGroup(self); sg.addButton(self.src_sel); sg.addButton(self.src_rep)
         src = "\n".join(paths[:6]) + (f"\n… and {len(paths) - 6} more" if len(paths) > 6 else "")
-        self.sel_lbl = QLabel(src or "(nothing selected)")
+        self.sel_lbl = QLabel(mask(src) or "(nothing selected)")
         self.sel_lbl.setStyleSheet("color: gray")
         f.addRow("Source", self.src_sel)
         f.addRow("", self.sel_lbl)
@@ -1591,6 +2157,14 @@ class Job(QObject):
         self.t0 = time.time()
         self._rate_hist = []
 
+    def _final_rate(self, snap=None):
+        """Once a job ends, show the run's average speed instead of the last
+        10-second window (which mostly covers the final manifest commit)."""
+        snap = snap or self.last or {}
+        b, e = snap.get("bytes_done") or 0, snap.get("elapsed") or (time.time() - self.t0)
+        if b and e > 0:
+            self.rate = b / e
+
     def _rate(self, nbytes):
         now = time.time()
         self._rate_hist.append((now, nbytes))
@@ -1622,6 +2196,7 @@ class ArchiveJob(Job):
         self.summary = None
         self.failed_list = None
         self.incremental = "--incremental" in cmd
+        self.run_id = None
 
     def retry_command(self):
         """Same run settings, but the source is this run's failed-file list
@@ -1630,6 +2205,8 @@ class ArchiveJob(Job):
         parallel. Incremental is dropped: the list says exactly what to send."""
         if not self.failed_list or not os.path.isfile(self.failed_list):
             return None
+        if any(a in ("--src-s3", "--src-manifest") for a in self.cmd):
+            return self._retry_s3()
         out, skip = [], 0
         drop_with_value = {"--walk-path", "--input-file", "--input-format", "--path-column"}
         for i, a in enumerate(self.cmd):
@@ -1643,6 +2220,34 @@ class ArchiveJob(Job):
                 continue
             out.append(a)
         return out + ["--input-file", self.failed_list, "--input-format", "lines"]
+
+    def _retry_s3(self):
+        out, skip, base, listed = [], 0, None, None
+        for i, a in enumerate(self.cmd):
+            if skip:
+                skip -= 1
+                continue
+            if a in ("--src-s3", "--src-manifest", "--src-manifest-format", "--src-prefix"):
+                if a == "--src-prefix":
+                    base = self.cmd[i + 1]
+                if a == "--src-s3":
+                    listed = self.cmd[i + 1].split("/", 3)[3] if self.cmd[i + 1].count("/") >= 3 else ""
+                skip = 1
+                continue
+            if a == "--incremental":
+                continue
+            out.append(a)
+        base = base if base is not None else (listed or "")
+        return out + ["--src-manifest", self.failed_list, "--src-manifest-format", "uris",
+                      "--src-prefix", base]
+
+    def resume_command(self):
+        """Same job again, skipping every file this run (and the runs it was
+        itself resuming) already archived: an interrupted run completes with no
+        gaps and no duplicates."""
+        if not self.run_id:
+            return None
+        return list(self.cmd) + ["--resume-run", self.run_id]
 
     def failed_count(self):
         if not self.failed_list or not os.path.isfile(self.failed_list):
@@ -1661,23 +2266,37 @@ class ArchiveJob(Job):
         if self.proc.state() == QProcess.NotRunning:
             return
         if self.state != "cancelling":
-            # SIGINT: the archiver unwinds -- flushes pending manifest rows and
-            # stops the writer -- instead of dying mid-commit.
+            # SIGINT: the archiver drops queued tars (their files go to the
+            # failed list for a retry), finishes the tars already in progress
+            # and commits their manifest rows -- so nothing becomes an orphan.
+            # No timer: on a slow link that can take minutes, and killing it
+            # midway is what creates orphans.
             self.state = "cancelling"
-            self.log.emit(f"[job {self.id}] cancelling (SIGINT); in-flight tars finish first")
+            self.phase = "cancelling — finishing the tars in progress"
+            self.log.emit(f"[job {self.id}] cancelling: queued tars dropped, tars in progress "
+                          f"finish and are recorded (Cancel again to force-stop)")
             try:
                 os.kill(self.proc.processId(), signal.SIGINT)
             except Exception:
                 self.proc.terminate()
-            QTimer.singleShot(60_000, self._force)
         else:
-            self._force()
+            if QMessageBox.question(
+                    None, "Force stop",
+                    "Stop now, without waiting for the tars in progress?\n\nTars that are "
+                    "mid-upload may end up in S3 without manifest rows (orphans, flagged in "
+                    "the Tar objects view).") == QMessageBox.Yes:
+                self._force()
         self.changed.emit(self)
 
     def _force(self):
         if self.proc.state() != QProcess.NotRunning:
-            self.log.emit(f"[job {self.id}] still running; terminating")
-            self.proc.terminate()
+            self.log.emit(f"[job {self.id}] force-stopping")
+            try:   # a second SIGINT makes the archiver skip the wait and unwind
+                os.kill(self.proc.processId(), signal.SIGINT)
+            except Exception:
+                pass
+            QTimer.singleShot(5_000, lambda: self.proc.state() != QProcess.NotRunning
+                              and self.proc.terminate())
             QTimer.singleShot(10_000, lambda: self.proc.state() != QProcess.NotRunning and self.proc.kill())
 
     def _stderr(self):
@@ -1736,6 +2355,8 @@ class ArchiveJob(Job):
         self.counts = (p.get("bundling", 0), p.get("uploading", 0))
         if p.get("failed_list"):
             self.failed_list = p["failed_list"]
+        if p.get("run_id"):
+            self.run_id = p["run_id"]
         if p.get("unchanged") and not self.incremental:
             self.detail += f" · {p['unchanged']:,} unchanged (incremental)"
         if p.get("skipped"):
@@ -1758,13 +2379,183 @@ class ArchiveJob(Job):
             self.fraction, self.determinate = 1.0, True
         self.active = []
         self.phase = {"done": "completed", "failed": f"failed (exit {code})",
-                      "cancelled": "cancelled — orphan tars possible, see README"}[self.state]
+                      "cancelled": "cancelled — Resume continues where it stopped"}[self.state]
         nfail = (self.summary or self.last or {}).get("failed", 0)
         if nfail and self.state == "done":
             self.phase = f"completed — {nfail:,} files failed (Retry failed files)"
         self.eta = None
+        self._final_rate()
         self.changed.emit(self)
         self.finished.emit(self)
+
+
+class RemoteJob(ArchiveJob):
+    """An S3-source archive running on an EC2 instance (started through SSM).
+    Same interface as ArchiveJob for the monitor, Cancel, Retry and Resume; the
+    progress comes from the status object the archiver writes to S3."""
+    POLL_MS = 3000
+
+    def __init__(self, cmd, cfg, title, instance, run_id=None, pid=None, status_uri=None):
+        super().__init__(cmd, ".", cfg, f"{title}  @ {instance.get('name') or instance['id']}")
+        import remote as R
+        self.remote = R.Remote(cfg)
+        self.instance = instance
+        self.run_id, self.pid, self.status_uri = run_id, pid, status_uri
+        self.settings = None
+        self._seq = 0
+        self._last_update = time.time()
+        self._checking = False
+        self._polling = False
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._poll)
+        self._sig = _Signals()
+
+    # -- lifecycle ----------------------------------------------------------
+    def start(self):
+        self.state, self.phase = "running", "starting on EC2 (preparing runner…)"
+        self.changed.emit(self)
+        rid = self.run_id or self.remote.new_run_id()
+        args = self.cmd[3:]       # [python, -u, script, ...args]
+
+        def ok(info):
+            self.run_id, self.pid, self.status_uri = info["run_id"], info["pid"], info["status_uri"]
+            self.log.emit(f"[job {self.id}] started on {self.instance['id']} as pid {self.pid}; "
+                          f"progress: {self.status_uri}")
+            self.phase = "running on EC2"
+            self._persist()
+            self.timer.start(self.POLL_MS)
+            self.changed.emit(self)
+
+        def fail(msg):
+            self.state, self.phase = "failed", "could not start on EC2"
+            self.log.emit(f"[job {self.id}] {msg}")
+            self.changed.emit(self); self.finished.emit(self)
+
+        self.log.emit(f"[job {self.id}] starting on EC2 {self.instance['id']} via SSM")
+        run_async(self, self.remote.start, ok, fail, self.instance["id"], args, rid)
+
+    def attach(self):
+        """Reconnect to a run started by an earlier GUI session."""
+        self.state, self.phase = "running", "running on EC2"
+        self.log.emit(f"[job {self.id}] reattached to {self.run_id} on {self.instance['id']}")
+        self.timer.start(self.POLL_MS)
+        self.changed.emit(self)
+
+    def _persist(self, remove=False):
+        if self.settings is None:
+            return
+        jobs = [j for j in json.loads(self.settings.get("remote_jobs", "[]") or "[]")
+                if j.get("run_id") != self.run_id]
+        if not remove:
+            jobs.append({"run_id": self.run_id, "pid": self.pid, "status_uri": self.status_uri,
+                         "instance": self.instance, "cmd": self.cmd, "title": self.title})
+        self.settings.set("remote_jobs", json.dumps(jobs))
+
+    def _poll(self):
+        if self._polling or not self.status_uri:
+            return
+        self._polling = True
+
+        def ok(snap):
+            self._polling = False
+            if snap:
+                self._take(snap)
+            elif time.time() - self._last_update > 180:
+                self._check_alive()
+
+        def fail(msg):
+            self._polling = False
+            self.log.emit(f"[job {self.id}] status read failed: {msg.splitlines()[0]}")
+
+        run_async(self, self.remote.read_status, ok, fail, self.status_uri)
+
+    def _take(self, snap):
+        if snap.get("updated") != getattr(self, "_last_seen", None):
+            self._last_seen = snap.get("updated")
+            self._last_update = time.time()
+        for seq, line in snap.get("log", []):
+            if seq > self._seq:
+                self._seq = seq
+                self.log.emit(f"[job {self.id}] {line}")
+        state = self.state
+        self._apply(snap)
+        self.failed_list = snap.get("failed_list_s3") or None
+        self.state = state
+        if snap.get("ev") == "done" and snap.get("status"):
+            self._finish(snap)
+        elif time.time() - self._last_update > 90:
+            self._check_alive()
+
+    def _check_alive(self):
+        if self._checking or not self.pid:
+            return
+        self._checking = True
+
+        def ok(alive):
+            self._checking = False
+            if not alive:
+                self.timer.stop()
+                self.state, self.phase = "failed", "the archiver stopped on EC2 without a final status"
+                self.log.emit(f"[job {self.id}] pid {self.pid} is gone; see {REMOTE_LOG_HINT}")
+                self._persist(remove=True)
+                self.changed.emit(self); self.finished.emit(self)
+            else:
+                self._last_update = time.time()
+
+        run_async(self, self.remote.alive, ok, lambda m: setattr(self, "_checking", False),
+                  self.instance["id"], self.pid)
+
+    def _finish(self, snap):
+        self.timer.stop()
+        st = snap["status"]
+        self.state = {"ok": "done", "partial": "done", "cancelled": "cancelled"}.get(st, "failed")
+        if self.state == "done":
+            self.fraction, self.determinate = 1.0, True
+        self.active = []
+        self.phase = {"done": "completed on EC2", "failed": "failed on EC2",
+                      "cancelled": "cancelled — Resume continues where it stopped"}[self.state]
+        if snap.get("failed") and self.state == "done":
+            self.phase = f"completed on EC2 — {snap['failed']:,} files failed (Retry failed files)"
+        self.eta = None
+        self._final_rate(snap)
+        self._persist(remove=True)
+        self.changed.emit(self); self.finished.emit(self)
+
+    # -- actions --------------------------------------------------------------
+    def cancel(self):
+        if self.state not in ("running", "cancelling") or not self.pid:
+            return
+        force = self.state == "cancelling"
+        if force and QMessageBox.question(
+                None, "Force stop", "Stop the EC2 run now, without waiting for the tars in "
+                "progress?\n\nTars that are mid-upload may end up without manifest rows "
+                "(orphans, flagged in the Tar objects view).") != QMessageBox.Yes:
+            return
+        self.state = "cancelling"
+        self.phase = "cancelling on EC2 — finishing the tars in progress"
+        self.log.emit(f"[job {self.id}] {'force-stopping' if force else 'cancelling'} pid {self.pid} via SSM")
+        run_async(self, self.remote.cancel, lambda *_: None,
+                  lambda m: self.log.emit(f"[job {self.id}] cancel failed: {m.splitlines()[0]}"),
+                  self.instance["id"], self.pid, force)
+        self.changed.emit(self)
+
+    def retry_command(self):
+        if not self.failed_list:
+            return None
+        return self._retry_s3()
+
+    def failed_count(self):
+        if not self.failed_list:
+            return 0
+        if getattr(self, "_failed_n", None) is None:
+            try:
+                self._failed_n = sum(1 for ln in self.remote.fetch_text(self.failed_list).splitlines() if ln.strip())
+            except Exception:
+                return 0
+        return self._failed_n
+
+
+REMOTE_LOG_HINT = "/var/lib/sfa/<run id>.log on the instance"
 
 
 class RestoreJob(Job):
@@ -1879,8 +2670,12 @@ class MonitorPane(QTabWidget):
         self.btn_retry.setEnabled(False)
         self.btn_open_failed = QPushButton("Show failed list")
         self.btn_open_failed.setEnabled(False)
+        self.btn_resume = QPushButton("Resume")
+        self.btn_resume.setToolTip("Continue a cancelled or failed archive job: the same source "
+                                   "again, skipping files this run already archived")
+        self.btn_resume.setEnabled(False)
         bar.addStretch(1)
-        for b in (self.btn_open_failed, self.btn_retry, self.btn_clear, self.btn_cancel):
+        for b in (self.btn_open_failed, self.btn_resume, self.btn_retry, self.btn_clear, self.btn_cancel):
             bar.addWidget(b)
         v.addWidget(self.tree, 1); v.addLayout(bar)
         self.addTab(w, "Monitoring")
@@ -1893,7 +2688,7 @@ class MonitorPane(QTabWidget):
         self.btn_open_failed.clicked.connect(self._open_failed)
 
     def add(self, job):
-        it = QTreeWidgetItem([f"#{job.id} {job.kind}: {job.title}", "", "", "", "", ""])
+        it = QTreeWidgetItem([mask(f"#{job.id} {job.kind}: {job.title}"), "", "", "", "", ""])
         self.tree.insertTopLevelItem(0, it)
         bar = QProgressBar(); bar.setMaximumHeight(16); bar.setTextVisible(True)
         self.tree.setItemWidget(it, 2, bar)
@@ -1965,9 +2760,19 @@ class MonitorPane(QTabWidget):
         self.btn_retry.setEnabled(n > 0)
         self.btn_retry.setText(f"Retry failed files ({n:,})" if n else "Retry failed files")
         self.btn_open_failed.setEnabled(bool(isinstance(j, ArchiveJob) and j.failed_list))
+        self.btn_resume.setEnabled(bool(isinstance(j, ArchiveJob) and j.run_id
+                                        and j.state in ("cancelled", "failed")))
 
     def _open_failed(self):
         j = self.selected_job()
+        if isinstance(j, RemoteJob) and j.failed_list:
+            import tempfile
+            tsv = j.failed_list[:-4] + ".tsv"
+            path = os.path.join(tempfile.mkdtemp(prefix="sfa-failed-"), "failed.tsv")
+            with open(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), "w") as fh:
+                fh.write(j.remote.fetch_text(tsv))
+            QProcess.startDetached("open", ["-R", path])
+            return
         if j and j.failed_list:
             tsv = j.failed_list[:-4] + ".tsv"
             QProcess.startDetached("open", ["-R", tsv if os.path.isfile(tsv) else j.failed_list])
@@ -2004,7 +2809,8 @@ class MainWindow(QMainWindow):
         self.resize(1500, 950)
         self.s = Settings()
 
-        self.local = LocalPane(self.s)
+        self.source = SourcePane(self.s)
+        self.local = self.source.local          # restore target + local archive source
         self.archive = ArchivePane(self.s)
         mid = QWidget(); mv = QVBoxLayout(mid); mv.addStretch(1)
         self.btn_arch = QPushButton("Archive →"); self.btn_arch.setToolTip("Bundle the selected local files/folders into tars on S3")
@@ -2014,7 +2820,7 @@ class MainWindow(QMainWindow):
         mv.addStretch(1)
 
         top = QSplitter(Qt.Horizontal)
-        top.addWidget(self.local); top.addWidget(mid); top.addWidget(self.archive)
+        top.addWidget(self.source); top.addWidget(mid); top.addWidget(self.archive)
         top.setStretchFactor(0, 5); top.setStretchFactor(1, 0); top.setStretchFactor(2, 6)
         self.monitor = MonitorPane()
         vs = QSplitter(Qt.Vertical)
@@ -2044,12 +2850,15 @@ class MainWindow(QMainWindow):
         sb.addWidget(self.sb_text, 1); sb.addPermanentWidget(self.sb_bar)
         self.archive.status.connect(self._status_msg)
         self.monitor.btn_retry.clicked.connect(self.retry_failed)
+        self.monitor.btn_resume.clicked.connect(self.resume_job)
 
         self.sb_timer = QTimer(self); self.sb_timer.timeout.connect(self._update_statusbar)
         self.sb_timer.start(500)
 
         if not self.s.config().complete():
             QTimer.singleShot(300, self.open_wizard)
+        else:
+            QTimer.singleShot(500, self._reattach_remote)
 
     def _status_msg(self, msg):
         self.monitor.append_log(msg)
@@ -2073,16 +2882,48 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Archive", "Still connecting to the archive — try again "
                                     "in a moment (see the Log tab if it doesn't connect).")
             return
-        paths = self.local.selected_paths()
-        dlg = ArchiveDialog(paths, self.s, self, manifest=self.archive.manifest,
-                            report_dir=self.local.cwd)
+        if self.source.mode == "s3":
+            src = self.source.s3
+            if not src.bucket:
+                QMessageBox.information(self, "Archive", "Pick a source bucket in the left pane first.")
+                return
+            dlg = S3ArchiveDialog(src.bucket, src.cwd, src.selected(), self.s, self,
+                                  manifest=self.archive.manifest)
+        else:
+            paths = self.local.selected_paths()
+            dlg = ArchiveDialog(paths, self.s, self, manifest=self.archive.manifest,
+                                report_dir=self.local.cwd)
         if not dlg.exec():
             return
         cmd, err = dlg.command()
         if err:
-            QMessageBox.warning(self, "Archive", err)
+            QMessageBox.warning(self, "Archive", mask(err))
             return
-        self.start_archive(cmd, dlg.title())
+        inst = dlg.run_on_instance() if isinstance(dlg, S3ArchiveDialog) else None
+        if inst:
+            self.start_remote(cmd, dlg.title(), inst)
+        else:
+            self.start_archive(cmd, dlg.title())
+
+    def start_remote(self, cmd, title, instance, run_id=None, pid=None, status_uri=None):
+        job = RemoteJob(cmd, self.s.config(), title, instance, run_id, pid, status_uri)
+        job.settings = self.s
+        self.monitor.add(job)
+        job.finished.connect(self._job_finished)
+        if status_uri:
+            job.attach()
+        else:
+            job.start()
+        return job
+
+    def _reattach_remote(self):
+        try:
+            jobs = json.loads(self.s.get("remote_jobs", "[]") or "[]")
+        except ValueError:
+            jobs = []
+        for j in jobs:
+            self.start_remote(j["cmd"], j["title"].split("  @ ")[0], j["instance"],
+                              j["run_id"], j.get("pid"), j["status_uri"])
 
     def start_archive(self, cmd, title):
         cfg = self.s.config()
@@ -2110,7 +2951,7 @@ class MainWindow(QMainWindow):
             return
         dest = dlg.dest.text().strip()
         if not os.path.isdir(dest):
-            QMessageBox.warning(self, "Restore", f"{dest} is not a folder.")
+            QMessageBox.warning(self, "Restore", mask(f"{dest} is not a folder."))
             return
         first = selection_label(*sel[0])
         title = first + (f" +{len(sel) - 1}" if len(sel) > 1 else "")
@@ -2124,6 +2965,24 @@ class MainWindow(QMainWindow):
         self.monitor.add(job)
         job.finished.connect(self._job_finished)
         job.start()
+
+    def resume_job(self):
+        j = self.monitor.selected_job()
+        if not isinstance(j, ArchiveJob):
+            return
+        cmd = j.resume_command()
+        if cmd is None:
+            QMessageBox.information(self, "Resume", "This job has no run to resume.")
+            return
+        if QMessageBox.question(
+                self, "Resume archive job",
+                f"Continue job #{j.id}? The same source is archived again, skipping every "
+                f"file this run already archived, so nothing is duplicated.") != QMessageBox.Yes:
+            return
+        if isinstance(j, RemoteJob):
+            self.start_remote(cmd, f"resume of #{j.id}", j.instance)
+        else:
+            self.start_archive(cmd, f"resume of #{j.id}")
 
     def retry_failed(self):
         j = self.monitor.selected_job()
@@ -2140,7 +2999,10 @@ class MainWindow(QMainWindow):
                 f"destination and settings?\n\nFiles that fail again go to a new failed "
                 f"list.") != QMessageBox.Yes:
             return
-        self.start_archive(cmd, f"retry of #{j.id} ({n:,} files)")
+        if isinstance(j, RemoteJob):
+            self.start_remote(cmd, f"retry of #{j.id} ({n:,} files)", j.instance)
+        else:
+            self.start_archive(cmd, f"retry of #{j.id} ({n:,} files)")
 
     def _job_finished(self, job):
         self._status_msg(f"Job #{job.id} {job.kind} {job.state}: {job.detail}")
@@ -2182,14 +3044,24 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev):
         run = self.monitor.running()
-        if run and QMessageBox.question(
-                self, "Quit", f"{len(run)} job(s) still running. Cancel them and quit?") != QMessageBox.Yes:
-            ev.ignore()
-            return
-        for j in run:
+        # EC2 runs are detached on the instance: quitting only stops watching them
+        # (they reattach on the next start). Only local jobs are cancelled.
+        remote = [j for j in run if isinstance(j, RemoteJob)]
+        local = [j for j in run if not isinstance(j, RemoteJob)]
+        if local:
+            msg = f"{len(local)} local job(s) still running. Cancel them and quit?"
+            if remote:
+                msg += (f"\n\n{len(remote)} EC2 job(s) keep running on the instance and "
+                        f"reattach the next time you open the app.")
+            if QMessageBox.question(self, "Quit", msg) != QMessageBox.Yes:
+                ev.ignore()
+                return
+        for j in remote:
+            j.timer.stop()
+        for j in local:
             j.cancel()
-        for j in run:
-            if isinstance(j, ArchiveJob):
+        for j in local:
+            if isinstance(j, ArchiveJob) and getattr(j, "proc", None) is not None:
                 j.proc.waitForFinished(15_000)
         ev.accept()
 

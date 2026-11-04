@@ -37,7 +37,8 @@ def run_archiver(command):
     try:
         if check_lock_file():
             return "", "Another archiver process is already running. Please wait."
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, text=True)
+        # argument list, no shell: form fields can never be run as shell commands
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         # Create lock file with current process ID
         create_lock_file(process.pid)
@@ -102,10 +103,10 @@ elif st.session_state.page == 2:
 
         if batch == "size":
             max_size = st.text_input("Max Tarfile Size(MB,GB)", value="100MB")
-            command = f"python3 {program} --src-path {src_path} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-size {max_size} --tar-storageclass {tar_storageclass}"
+            command = ["python3", program, "--src-path", src_path, "--dst-bucket", dst_bucket, "--dst-prefix", dst_prefix, "--num-threads", str(num_threads), "--max-size", max_size, "--tar-storageclass", tar_storageclass]
         else:
             max_files = st.number_input("Max files in a tarfile ", value=10000)
-            command = f"python3 {program} --src-path {src_path} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files} --tar-storageclass {tar_storageclass}"
+            command = ["python3", program, "--src-path", src_path, "--dst-bucket", dst_bucket, "--dst-prefix", dst_prefix, "--num-threads", str(num_threads), "--max-files", str(max_files), "--tar-storageclass", tar_storageclass]
         
     elif function_name == "s3_to_s3":
         src_bucket = st.text_input("Source Bucket")
@@ -116,10 +117,10 @@ elif st.session_state.page == 2:
 
         if batch == "size":
             max_size = st.text_input("Max Tarfile Size(MB,GB)", value="100MB")
-            command = f"python3 {program} --src-bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-size {max_size} --tar-storageclass {tar_storageclass}"
+            command = ["python3", program, "--src-bucket", src_bucket, "--src-prefix", src_prefix, "--dst-bucket", dst_bucket, "--dst-prefix", dst_prefix, "--num-threads", str(num_threads), "--max-size", max_size, "--tar-storageclass", tar_storageclass]
         else:
             max_files = st.number_input("Max files in a tarfile ", value=10000)
-            command = f"python3 {program} --src-bucket {src_bucket} --src-prefix {src_prefix} --dst-bucket {dst_bucket} --dst-prefix {dst_prefix} --num-threads {num_threads} --max-files {max_files} --tar-storageclass {tar_storageclass}"
+            command = ["python3", program, "--src-bucket", src_bucket, "--src-prefix", src_prefix, "--dst-bucket", dst_bucket, "--dst-prefix", dst_prefix, "--num-threads", str(num_threads), "--max-files", str(max_files), "--tar-storageclass", tar_storageclass]
 
     if st.button("Run"):
         if check_lock_file():

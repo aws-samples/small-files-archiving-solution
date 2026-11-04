@@ -1,0 +1,2 @@
+pyiceberg[pyarrow,pyiceberg-core]>=0.11
+boto3[crt]>=1.34

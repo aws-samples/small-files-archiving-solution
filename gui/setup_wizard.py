@@ -1,8 +1,12 @@
 """
-First-run setup wizard: pick an AWS profile and region, then choose or create
-the S3 Tables table bucket, the manifest tables and the tar bucket. Users never
-type or see an ARN or account id -- buckets are picked by name and ARNs are
-derived internally.
+Setup wizard: pick an AWS profile and Region, then either
+  * create a new archive -- choose or create the S3 Tables table bucket, the
+    manifest tables and the tar bucket, or
+  * connect an existing archive -- pick a table bucket, pick one of the archive
+    manifests found in it, and confirm its tar bucket (read from the table, or
+    picked and verified with a sample tar).
+Either way the archive is added to the named archive list. Users never type or
+see an ARN or account id -- buckets are picked by name, ARNs derived internally.
 """
 import uuid
 
@@ -14,6 +18,9 @@ from PySide6.QtWidgets import (
 
 import backend
 from backend import Provisioner, mask
+from archives import ArchiveRegistry, default_name
+
+P_CRED, P_MODE, P_TB, P_BK, P_TABLES, P_CONNECT, P_SUM = range(7)
 
 REGIONS = ["ap-northeast-2", "ap-northeast-1", "ap-northeast-3", "ap-southeast-1",
            "ap-southeast-2", "ap-south-1", "us-east-1", "us-east-2", "us-west-2",
@@ -45,7 +52,7 @@ class CredentialsPage(QWizardPage):
     def __init__(self, s):
         super().__init__()
         self.s = s
-        self.setTitle("1. AWS credentials")
+        self.setTitle("AWS credentials")
         self.setSubTitle("Choose the AWS CLI profile and the Region to work in.")
         f = QFormLayout(self)
         self.profile = QComboBox(); self.profile.setEditable(True)
@@ -97,6 +104,33 @@ class CredentialsPage(QWizardPage):
     def initializePage(self):
         if not self.ok:
             self.check()
+
+    def nextId(self):
+        return P_MODE
+
+
+class ModePage(QWizardPage):
+    def __init__(self, s):
+        super().__init__()
+        self.setTitle("New or existing archive")
+        self.setSubTitle("Create a new archive, or connect to one that already exists "
+                         "(for example, one a colleague or an earlier setup created).")
+        v = QVBoxLayout(self)
+        self.create = QRadioButton("Create a new archive")
+        self.connect = QRadioButton("Connect an existing archive")
+        g = QButtonGroup(self); g.addButton(self.create); g.addButton(self.connect)
+        v.addWidget(self.create)
+        v.addWidget(_hint("Pick or create the table bucket, the tar bucket and the manifest tables."))
+        v.addSpacing(10)
+        v.addWidget(self.connect)
+        v.addWidget(_hint("Pick a table bucket; the wizard lists the archive manifests in it and "
+                          "finds or checks the tar bucket. Nothing is created or changed in your "
+                          "archive, except recording its tar bucket in the table if it isn't yet."))
+        v.addStretch(1)
+        (self.connect if ArchiveRegistry(s).names() else self.create).setChecked(True)
+
+    def nextId(self):
+        return P_TB if self.create.isChecked() else P_CONNECT
 
 
 class PickOrCreatePage(QWizardPage):
@@ -169,7 +203,7 @@ class PickOrCreatePage(QWizardPage):
 class TableBucketPage(PickOrCreatePage):
     def __init__(self, wiz, s):
         super().__init__(
-            "2. S3 Tables table bucket",
+            "S3 Tables table bucket",
             "Holds the manifest that maps every archived file to its tar and byte range.",
             "table bucket", backend.valid_table_bucket,
             f"small-files-archive-{uuid.uuid4().hex[:6]}", s.config().table_bucket,
@@ -184,13 +218,14 @@ class TableBucketPage(PickOrCreatePage):
 class TarBucketPage(PickOrCreatePage):
     def __init__(self, wiz, s):
         super().__init__(
-            "3. S3 bucket for the tar files",
+            "S3 bucket for the tar files",
             "The general purpose bucket where the tar objects are stored.",
             "bucket", backend.valid_s3_bucket,
             f"small-files-archive-tars-{uuid.uuid4().hex[:8]}", s.get("bucket"),
             "Bucket names are global across all AWS accounts, so the suggestion has a "
             "random suffix. A new bucket is created private: all Block Public Access "
-            "settings on, ACLs disabled, SSE-S3 encryption. Only buckets in the chosen "
+            "settings on, ACLs disabled, SSE-S3 encryption, HTTPS-only access, and a rule that "
+            "cleans up interrupted multipart uploads after 7 days. Only buckets in the chosen "
             "Region are listed.")
         self.wiz = wiz
 
@@ -201,7 +236,7 @@ class TarBucketPage(PickOrCreatePage):
 class TablesPage(QWizardPage):
     def __init__(self, s):
         super().__init__()
-        self.setTitle("4. Manifest tables")
+        self.setTitle("Manifest tables")
         self.setSubTitle("Namespace and table names inside the table bucket.")
         f = QFormLayout(self)
         self.ns = QLineEdit(s.config().namespace)
@@ -232,32 +267,182 @@ class TablesPage(QWizardPage):
     def isComplete(self):
         return not self.err.text()
 
+    def nextId(self):
+        return P_SUM
+
+
+class ConnectPage(QWizardPage):
+    """Connect an existing archive: table bucket -> manifest -> tar bucket."""
+
+    def __init__(self, wiz):
+        super().__init__()
+        self.wiz = wiz
+        self.setTitle("Connect an existing archive")
+        self.setSubTitle("Pick the table bucket and the archive manifest. The tar bucket is "
+                         "filled in when the archive recorded it; otherwise pick it and it is checked.")
+        f = QFormLayout(self)
+        self.tb = QComboBox()
+        self.manifest = QComboBox()
+        self.bucket = QComboBox(); self.bucket.setEditable(True)
+        self.status = QLabel(""); self.status.setWordWrap(True)
+        self.btn_check = QPushButton("Check tar bucket")
+        f.addRow("Table bucket", self.tb)
+        f.addRow("Archive manifest", self.manifest)
+        f.addRow("Tar bucket", self.bucket)
+        f.addRow("", self.btn_check)
+        f.addRow("", self.status)
+        f.addRow("", _hint("Only tables with the archive manifest columns are listed. The check "
+                           "looks up one tar from the manifest in the bucket (read-only)."))
+        self._manifests = []
+        self.verified = None          # (table bucket, ns, table, bucket) that passed the check
+        self.tb.currentTextChanged.connect(self._load_manifests)
+        self.manifest.currentIndexChanged.connect(self._manifest_changed)
+        self.bucket.currentTextChanged.connect(self._bucket_changed)
+        self.btn_check.clicked.connect(self.check)
+
+    def initializePage(self):
+        prov = self.wiz.prov()
+        self.tb.blockSignals(True); self.tb.clear(); self.tb.addItem("Loading…")
+        names, err = _call(prov.list_table_buckets)
+        self.tb.clear()
+        if err:
+            self.status.setText(f"✗ Could not list table buckets: {mask(err)}")
+            names = []
+        self.tb.addItems(names or [])
+        saved = self.wiz.s.config().table_bucket
+        if saved in (names or []):
+            self.tb.setCurrentText(saved)
+        self.tb.blockSignals(False)
+        buckets, _ = _call(prov.list_buckets)
+        self.bucket.blockSignals(True); self.bucket.clear(); self.bucket.addItems(buckets or [])
+        self.bucket.blockSignals(False)
+        self._load_manifests()
+
+    def _arn(self):
+        return self.wiz.prov().table_bucket_arn(self.tb.currentText().strip())
+
+    def _load_manifests(self, *_):
+        self.manifest.blockSignals(True); self.manifest.clear()
+        self.verified = None
+        name = self.tb.currentText().strip()
+        if not name or name == "Loading…":
+            self.manifest.blockSignals(False); self.completeChanged.emit()
+            return
+        self.status.setText("Looking for archive manifests…")
+        prov = self.wiz.prov()
+        found, err = _call(lambda: prov.list_manifests(prov.table_bucket_arn(name)))
+        self._manifests = found or []
+        for m in self._manifests:
+            extra = "" if m["dirs"] and m["runs"] else "  (no folder index / run history yet)"
+            self.manifest.addItem(f"{m['namespace']}.{m['table']}{extra}")
+        self.manifest.blockSignals(False)
+        if err:
+            self.status.setText(f"✗ Could not read the table bucket: {mask(err)}")
+        elif not self._manifests:
+            self.status.setText("No archive manifest in this table bucket. Pick another one, or go "
+                                "Back and choose “Create a new archive”.")
+        self._manifest_changed()
+
+    def selected(self):
+        i = self.manifest.currentIndex()
+        return self._manifests[i] if 0 <= i < len(self._manifests) else None
+
+    def _manifest_changed(self, *_):
+        m = self.selected()
+        self.verified = None
+        if m and m.get("tar_bucket"):
+            self.bucket.setCurrentText(m["tar_bucket"])
+            self.status.setText(f"The archive records its tar bucket: {m['tar_bucket']}. "
+                                f"Checking it…")
+            self.check()
+        elif m:
+            self.status.setText("This archive doesn't record its tar bucket (older archiver). "
+                                "Pick the bucket and click “Check tar bucket”.")
+        self.completeChanged.emit()
+
+    def _bucket_changed(self, *_):
+        self.verified = None
+        self.completeChanged.emit()
+
+    def check(self):
+        m = self.selected()
+        b = self.bucket.currentText().strip()
+        if not (m and b):
+            return
+        self.btn_check.setEnabled(False)
+        prov = self.wiz.prov()
+        tbn = self.tb.currentText().strip()
+        msg, err = _call(lambda: prov.verify_tar_bucket(prov.table_bucket_arn(tbn), m["namespace"],
+                                                         m["table"], b))
+        self.btn_check.setEnabled(True)
+        if err:
+            self.status.setText(f"✗ {mask(err)}")
+            self.verified = None
+        else:
+            self.status.setText(f"✓ s3://{b}: {msg}")
+            self.verified = (tbn, m["namespace"], m["table"], b)
+        self.completeChanged.emit()
+
+    def isComplete(self):
+        m = self.selected()
+        return bool(m and self.verified == (self.tb.currentText().strip(), m["namespace"],
+                                            m["table"], self.bucket.currentText().strip()))
+
+    def nextId(self):
+        return P_SUM
+
 
 class SummaryPage(QWizardPage):
     def __init__(self, wiz):
         super().__init__()
         self.wiz = wiz
-        self.setTitle("5. Review and apply")
-        self.setSubTitle("Nothing has been created yet. Click Finish to apply.")
+        self.setTitle("Review and apply")
         v = QVBoxLayout(self)
         self.plan = QLabel(""); self.plan.setWordWrap(True); self.plan.setTextFormat(Qt.RichText)
+        nr = QHBoxLayout()
+        self.name = QLineEdit()
+        self.name.setToolTip("How this archive is shown in the archive list")
+        nr.addWidget(QLabel("Name in the archive list:")); nr.addWidget(self.name, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
-        v.addWidget(self.plan); v.addWidget(self.log, 1)
+        v.addWidget(self.plan); v.addLayout(nr); v.addWidget(self.log, 1)
         self.done = False
+
+    def _connect_mode(self):
+        return self.wiz.p_mode.connect.isChecked()
+
+    def _target(self):
+        """(table bucket, tar bucket, namespace, table, create table bucket?, create bucket?)"""
+        w = self.wiz
+        if self._connect_mode():
+            m = w.p_connect.selected()
+            return (w.p_connect.tb.currentText().strip(), w.p_connect.bucket.currentText().strip(),
+                    m["namespace"], m["table"], False, False)
+        tb, tb_new = w.p_tb.choice()
+        bk, bk_new = w.p_bk.choice()
+        return tb, bk, w.p_tables.ns.text().strip(), w.p_tables.tbl.text().strip(), tb_new, bk_new
 
     def initializePage(self):
         w = self.wiz
-        tb, tb_new = w.p_tb.choice()
-        bk, bk_new = w.p_bk.choice()
-        ns, t = w.p_tables.ns.text().strip(), w.p_tables.tbl.text().strip()
-        rows = [
-            f"<b>Profile / Region:</b> {w.p_cred.prof() or '(default)'} / {w.region()}",
-            f"<b>Table bucket:</b> {tb} — {'<b>create</b>' if tb_new else 'existing'}",
-            f"<b>Tar bucket:</b> {bk} — {'<b>create</b> (private, SSE-S3)' if bk_new else 'existing'}",
-            f"<b>Tables:</b> {ns}.{t}, {t}_dirs, {t}_runs — "
-            f"{'create if missing' if w.p_tables.create.isChecked() else 'created by the first archive run'}",
-        ]
+        tb, bk, ns, t, tb_new, bk_new = self._target()
+        if self._connect_mode():
+            self.setSubTitle("Nothing is changed yet. Click Finish to add the archive to your list.")
+            rows = [f"<b>Profile / Region:</b> {w.p_cred.prof() or '(default)'} / {w.region()}",
+                    f"<b>Table bucket:</b> {tb} — existing",
+                    f"<b>Archive manifest:</b> {ns}.{t} — existing",
+                    f"<b>Tar bucket:</b> {bk} — existing, checked"]
+        else:
+            self.setSubTitle("Nothing has been created yet. Click Finish to apply.")
+            rows = [
+                f"<b>Profile / Region:</b> {w.p_cred.prof() or '(default)'} / {w.region()}",
+                f"<b>Table bucket:</b> {tb} — {'<b>create</b>' if tb_new else 'existing'}",
+                f"<b>Tar bucket:</b> {bk} — {'<b>create</b> (private, SSE-S3, HTTPS only)' if bk_new else 'existing'}",
+                f"<b>Tables:</b> {ns}.{t}, {t}_dirs, {t}_runs — "
+                f"{'create if missing' if w.p_tables.create.isChecked() else 'created by the first archive run'}",
+            ]
         self.plan.setText("<br>".join(rows))
+        if not self.name.text().strip() or not self.done:
+            self.name.setText(default_name({"table_bucket": tb, "namespace": ns, "table_name": t,
+                                            "bucket": bk}))
         self.log.clear()
         self.done = False
 
@@ -266,9 +451,8 @@ class SummaryPage(QWizardPage):
             return True       # second click on "Close"
         w = self.wiz
         prov = w.prov()
-        tb, tb_new = w.p_tb.choice()
-        bk, bk_new = w.p_bk.choice()
-        ns, t = w.p_tables.ns.text().strip(), w.p_tables.tbl.text().strip()
+        tb, bk, ns, t, tb_new, bk_new = self._target()
+        connect = self._connect_mode()
 
         def step(label, fn, *a):
             self.log.appendPlainText(f"… {label}")
@@ -288,11 +472,19 @@ class SummaryPage(QWizardPage):
         if not ok:
             return False
         if bk_new:
-            ok, _ = step(f"Create bucket {bk} (private, SSE-S3)", prov.create_bucket, bk)
+            ok, _ = step(f"Create bucket {bk} (private, SSE-S3, HTTPS only)", prov.create_bucket, bk)
             if not ok:
                 return False
-        if w.p_tables.create.isChecked():
-            ok, res = step(f"Create tables in {ns}", prov.create_tables, arn, ns, t)
+        if connect:
+            ok, msg = step(f"Check tar bucket {bk}", prov.verify_tar_bucket, arn, ns, t, bk)
+            if not ok:
+                return False
+            self.log.appendPlainText(f"   {msg}")
+            recorded, _ = _call(prov.record_tar_bucket, arn, ns, t, bk)
+            if recorded:
+                self.log.appendPlainText(f"✓ Recorded the tar bucket in {ns}.{t}")
+        elif w.p_tables.create.isChecked():
+            ok, res = step(f"Create tables in {ns}", prov.create_tables, arn, ns, t, bk)
             if not ok:
                 return False
             for name, state in res:
@@ -306,8 +498,12 @@ class SummaryPage(QWizardPage):
         s.set("namespace", ns)
         s.set("table_name", t)
         s.set("setup_done", 1)
+        listed = ArchiveRegistry(s).add(
+            {"profile": w.p_cred.prof(), "region": w.region(), "bucket": bk, "table_bucket": tb,
+             "table_bucket_arn": arn, "namespace": ns, "table_name": t}, name=self.name.text())
         self.done = True
-        self.log.appendPlainText("Saved. You can rerun this wizard any time from the toolbar.")
+        self.log.appendPlainText(f"Saved as “{listed}” in the archive list. Add more archives any "
+                                 f"time with + next to the archive list.")
         # stay on the page so the result is visible; Finish becomes Close
         self.setSubTitle("Done — everything above is ready and the settings are saved.")
         self.wiz.setButtonText(QWizard.FinishButton, "Close")
@@ -324,12 +520,17 @@ class SetupWizard(QWizard):
         self.setWizardStyle(QWizard.ModernStyle)
         self.setMinimumSize(720, 520)
         self.p_cred = CredentialsPage(settings)
+        self.p_mode = ModePage(settings)
         self.p_tb = TableBucketPage(self, settings)
         self.p_bk = TarBucketPage(self, settings)
         self.p_tables = TablesPage(settings)
+        self.p_connect = ConnectPage(self)
         self.p_sum = SummaryPage(self)
-        for p in (self.p_cred, self.p_tb, self.p_bk, self.p_tables, self.p_sum):
-            self.addPage(p)
+        for pid, p in ((P_CRED, self.p_cred), (P_MODE, self.p_mode), (P_TB, self.p_tb),
+                       (P_BK, self.p_bk), (P_TABLES, self.p_tables), (P_CONNECT, self.p_connect),
+                       (P_SUM, self.p_sum)):
+            self.setPage(pid, p)
+        self.setStartId(P_CRED)
 
     def region(self):
         return self.p_cred.region.currentText().strip()

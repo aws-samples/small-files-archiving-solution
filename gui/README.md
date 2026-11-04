@@ -5,8 +5,8 @@ Small Files Archiver bundles millions of small files into large tar objects in A
 This guide walks through the desktop app in the order you'll use it: **setup → archive → browse → restore**, then incremental runs, file-list reports and retrying failures.
 
 <p align="center">
-  <a href="docs/demo.mp4"><img src="docs/demo-preview.gif" width="860" alt="Demo: setup wizard, archiving 523,124 files, browsing, restore and an incremental run"></a><br>
-  <b>▶ Click the preview for the full 2-minute demo video (MP4, 2.6 MB)</b>
+  <a href="docs/demo.mp4"><img src="docs/demo-preview.gif" width="860" alt="1-minute intro: why small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
+  <b>▶ Click the preview for the 1-minute intro (MP4, 1.1 MB, recorded on AWS). Longer tour: the <a href="docs/demo-walkthrough.mp4">2-minute walkthrough</a> (local disk, incremental runs).</b>
 </p>
 
 > These screenshots and the video were taken in a test environment with demo data. Your bucket names and paths will differ.
@@ -20,7 +20,7 @@ This guide walks through the desktop app in the order you'll use it: **setup →
 5. [Browse the archive](#5-browse-the-archive)
 6. [Restore files](#6-restore-files)
 7. [Incremental archiving](#7-incremental-archiving)
-8. [Archive from a file-list report](#8-archive-from-a-file-list-report)
+8. [Archive from a file-list report](#8-archive-from-a-file-list-report) · [8b. from an S3 bucket](#8b-archive-from-an-s3-bucket)
 9. [Failed files and retry](#9-failed-files-and-retry)
 10. [Settings](#10-settings)
 11. [Reference](#11-reference): scale, permissions, older tables, notes
@@ -32,7 +32,7 @@ This guide walks through the desktop app in the order you'll use it: **setup →
 Requirements: macOS (the tested platform), Python 3.12 (installed automatically if you have [`uv`](https://docs.astral.sh/uv/)), and an AWS CLI profile (`aws configure` or `aws configure sso`). The app is plain PySide6 and should also run on Linux; *Show failed list* uses Finder and is macOS-only.
 
 ```bash
-cd v3/gui
+cd gui
 ./run-gui.sh          # first run creates .venv and installs requirements.txt
 ```
 
@@ -40,7 +40,17 @@ The app makes outbound AWS API calls only. It opens no network ports.
 
 ## 2. First-run setup wizard
 
-On first launch, a setup wizard creates or selects everything the archive needs. You never have to look up an ARN: buckets are chosen by name, and ARNs are derived internally. You can rerun the wizard any time from the toolbar (**Setup wizard**).
+On first launch, a setup wizard creates or connects everything the archive needs. You never have to look up an ARN: buckets are chosen by name, and ARNs are derived internally. Run it again any time with **+** next to the archive list, or **Setup wizard** in the toolbar.
+
+After the credentials, choose one of two paths:
+
+- **Create a new archive:** pick or create the table bucket, the tar bucket and the manifest tables (steps 2–4 below).
+- **Connect an existing archive**, for example one a colleague or another computer created:
+  1. Pick the table bucket. The wizard lists only the tables in it that are archive manifests (it checks their columns), and it skips the `_dirs` and `_runs` tables.
+  2. Pick the manifest. If the archive recorded its tar bucket, the wizard fills it in and checks it. Archives made by an older archiver didn't record it: pick the bucket, then click **Check tar bucket**. The check looks up one tar from the manifest in that bucket (read-only). A bucket that doesn't hold the archive's tars is refused.
+  3. On **Finish**, the tar bucket is recorded in the manifest table (`sfa.tar_bucket` table property) if it wasn't yet, so the next connect fills it in. Nothing else in the archive is changed.
+
+Either way, the last page asks for the **name** the archive gets in the archive list.
 
 ### Step 1 — AWS credentials
 
@@ -76,7 +86,7 @@ Existing tables with these names are reused, never overwritten.
 
 ### Step 5 — Review and apply
 
-Nothing is created until you click **Finish**. The wizard then creates each resource and shows the result. Click **Close** when it's done.
+Nothing is created until you click **Finish**. The wizard then creates each resource (or, when connecting, checks the tar bucket) and shows the result. It also adds the archive to the archive list under the name you gave it. Click **Close** when it's done. New manifest tables record their tar bucket in the `sfa.tar_bucket` table property.
 
 | Before Finish | After Finish |
 |---|---|
@@ -88,10 +98,10 @@ Nothing is created until you click **Finish**. The wizard then creates each reso
 
 | Area | What it is |
 |---|---|
-| **Local disk** (left) | Your filesystem. Double-click to open a folder, ↑ to go up, or type a path. Select one or more files or folders to archive. Columns resize like the archive pane's (drag, double-click to fit, right-click to reset). |
+| **Source** (left) | **Local disk** or **S3 bucket**. Local disk is your filesystem. Double-click to open a folder, ↑ to go up, or type a path. Select one or more files or folders to archive. Columns resize like the archive pane's (drag, double-click to fit, right-click to reset). |
 | **Archive →** / **← Restore** (middle) | Archive the left selection to S3, or restore the right selection into the current local folder. |
 | **Archive (S3)** (right) | The archive. **View: Files (untarred)** shows your original files and folders. **Tar objects** shows the tar files in the bucket. |
-| **Archive:** dropdown (right) | The last 10 archives you connected to (tar bucket, table bucket, table, Region). Pick one to switch; the pane reconnects and opens its root. |
+| **Archive:** list (right) | Your archives, **by name**. Pick one to switch: the pane reconnects, checks the tables, and opens the root. Hover for its buckets and table. **+** adds an archive (the wizard: create or connect). **Rename** renames the entry. **Remove** takes it off the list; the tars and the manifest in AWS are not touched. Archives from the old *recent archives* list are carried over automatically. |
 | Header line (right) | Profile, Region, tar bucket, table bucket and table. It never shows account IDs or user names. |
 | **Monitoring** / **Log** (bottom) | Every archive and restore job with progress, rate and ETA. The Log tab shows the detailed log. |
 | Status bar | All running jobs at a glance: how many tars are bundling or uploading, the total rate, and overall progress. |
@@ -126,7 +136,7 @@ While a job runs, the **Monitoring** tab shows the overall progress plus one row
 
 ![Archiving in progress: per-tar bundling bars and the status bar](docs/images/12-archiving-progress.png)
 
-While the source is still being scanned, the total isn't known yet, so the bar shows **"~N% of found"**. It switches to a real percentage with an ETA once scanning finishes. **Cancel selected job** stops a job cleanly: pending manifest rows are saved first.
+While the source is still being scanned, the total isn't known yet, so the bar shows **"~N% of found"**. It switches to a real percentage with an ETA once scanning finishes. **Cancel selected job** stops a job cleanly: tars already in progress are finished and recorded. **Resume** continues it later without duplicating anything.
 
 When the job finishes, the archive pane refreshes and shows the new files.
 
@@ -226,6 +236,77 @@ Instead of a folder walk, archive the files listed in a report: an export from a
 
 Reports run through the same parallel pipeline as folder walks. Scan threads check files concurrently, then worker processes bundle and upload. Raise **scan threads** for large reports.
 
+## 8b. Archive from an S3 bucket
+
+Switch the left pane to **Source: S3 bucket**. Pick the source bucket from the list (buckets in the Region from Settings, or type a name), then browse its folders. Objects show their size, storage class and date; listings are paged 1,000 at a time.
+
+Select **one folder** (or nothing, to take the current folder) or **a set of objects**, and click **Archive →**:
+
+| Field | Meaning |
+|---|---|
+| **Store keys relative to** | Keys are stored relative to this prefix. The default is the folder's parent, so `fs1/` keeps its name. Leave it empty to store full keys |
+| **GET concurrency** | Concurrent source GETs in total (default 256), spread over the worker processes. Small objects make the run GET-bound |
+| **list threads** | Parallel listing threads (default 16) |
+| **Compare each object's checksum…** | Each object's bytes are checked against the full-object checksum S3 stored for it. A mismatch fails that object |
+| **Incremental** | Only objects whose LastModified is newer than the last successful run of this folder |
+
+Everything else (destination, tar folders, bundling, part size, storage class) works as for local files. Progress, Cancel, Resume and Retry work the same; Retry re-sends the failed `s3://` keys.
+
+> 💡 **Data transfer.** Running on your computer reads every object over the internet, which is billed as S3 data transfer out (about $0.126/GB in Seoul). Set **Run on** to an EC2 instance instead, and the reads stay inside AWS: see *Run on EC2* below.
+
+Measured from a laptop: 523,124 objects (9.95 GiB) archived in 243 s, every object checked against its stored CRC64NVME.
+
+### Run on EC2 (no data transfer out)
+
+In the S3 Archive dialog, set **Run on** to one of your EC2 instances. The list shows Online, SSM-managed Linux instances in the Region. The GUI then only *controls* the run:
+
+1. It uploads the exact archiver files it is running to `s3://<tar bucket>/_sfa/runner/<version>/`. Through AWS Systems Manager, the instance installs them once into a private Python 3.12 venv under `/opt/sfa-runner/`, so the instance always runs the same version as the GUI. **Prepare instance** does this ahead of time.
+2. It starts the archiver **detached** on the instance. The run continues if your computer sleeps or the GUI is closed.
+3. The archiver writes its progress snapshot and the last log lines to `s3://<tar bucket>/_sfa/jobs/<run id>/status.json` every few seconds. The GUI shows the same bars, rate, ETA and Log tab as for local jobs. Reopening the GUI reattaches to runs that are still going.
+4. **Cancel** sends the clean cancel through SSM; a second click force-stops. **Resume** and **Retry failed files** start a new run on the same instance. The failed list is copied next to the status object.
+
+All object reads happen between the instance and S3, inside the Region; your computer only downloads the small status objects.
+
+#### Or: copy the script and run it yourself
+
+When the instance isn't managed by Systems Manager, or you want to start runs yourself (scheduled, in CloudShell, or one share of a large source per instance), click **Copy script for EC2** in the same dialog:
+
+1. The GUI uploads its archiver version to `s3://<tar bucket>/_sfa/runner/<version>/` (and, for selected objects, the selection list) and copies a short shell script to the clipboard. The script carries the dialog's settings, without your local AWS profile, so the instance role is used.
+2. Open a terminal on the instance (SSH, Session Manager or EC2 Instance Connect) and paste it. The first time, it fetches that version and builds a private Python 3.12 environment in `~/sfa-runner/`. It then starts the archive in the background and prints the log file, the run ID and the PID.
+3. Follow it with `tail -f` on that log. The archive shows up in the GUI's right pane as soon as tars are recorded.
+4. Stop it cleanly with `kill -INT <pid>`. To continue a stopped run, paste the script again with `RESUME_OF="<run id>"` on its first lines.
+
+The script runs inside `bash <<'SFA_EOF' … SFA_EOF`, so an error can't close your terminal. It contains the table bucket ARN, which includes your account ID; don't post it publicly. The instance role needs the archiver permissions and `s3:GetObject` on `_sfa/runner/*`.
+
+**Instance requirements**
+
+- Linux with the SSM agent, Online in Systems Manager. The runner brings its own Python 3.12 and installs **prebuilt wheels only**, never compiling on the instance. Amazon Linux 2023 is recommended. On Amazon Linux 2 (glibc 2.26) it works too, but picks the newest compatible wheels, for example pyarrow 20 instead of 26.
+- Network to S3 **without a NAT Gateway**: a public subnet, or an **S3 Gateway VPC Endpoint** (free). A NAT Gateway bills every GB that passes through it.
+- About 1 GB of free disk for the runner. Tars are built mostly in memory: plan on roughly `--num-workers` × 300 MB of RAM.
+- Size: small-object runs are CPU-bound and scale with vCPUs. When you pick an instance, the dialog fills in **Worker processes** as vCPU + 16 (at most 2 per vCPU) and **GET concurrency** as 32 per worker. You can still change both. Measured on 523,124 objects (9.95 GiB):
+  - `m5.2xlarge` (8 vCPU), 16 workers / 512 GETs: 92 MB/s.
+  - `c6in.8xlarge` (32 vCPU), 48 workers / 1536 GETs: 181 MB/s.
+  - Before the CRT client, the same m5.2xlarge with boto3 managed 35.5 MB/s.
+
+**IAM**
+
+- **Instance role:** the archiver permissions (see *IAM permissions*) on the source and tar buckets and the table bucket, plus `s3:GetObject` on `_sfa/runner/*` and `s3:PutObject` on `_sfa/jobs/*` in the tar bucket, plus `AmazonSSMManagedInstanceCore`. Avoid broad roles such as `AdministratorAccess` on archive instances.
+- **The GUI user:**
+  - `ssm:DescribeInstanceInformation`, `ec2:DescribeInstances`, `ssm:GetCommandInvocation`.
+  - `ssm:SendCommand` on `arn:aws:ssm:<region>::document/AWS-RunShellScript` **and** on the specific instance ARNs you allow.
+  - `s3:PutObject` on `_sfa/runner/*` and `s3:GetObject` on `_sfa/jobs/*` in the tar bucket.
+
+Commands run as root through SSM (the agent's default). Every value passed to the instance is shell-quoted, and the runner and work folders (`/opt/sfa-runner`, `/var/lib/sfa`) are `0700`.
+
+**Troubleshooting: `curlCode: 60` / "SSL peer certificate or SSH remote key was not OK"**
+
+The manifest is written through pyarrow's own S3 client, which looks for CA certificates at the Debian path `/etc/ssl/certs/ca-certificates.crt`. Amazon Linux, RHEL and SUSE keep them elsewhere. boto3 still works, so tar uploads would succeed while every manifest write fails.
+
+- The archiver sets `SSL_CERT_FILE` to the system bundle it finds (for example `/etc/pki/tls/certs/ca-bundle.crt`) when the Debian path is missing and `SSL_CERT_FILE` isn't already set. `AWS_CA_BUNDLE` does not affect pyarrow.
+- Before the first tar is uploaded, the archiver reads the table's metadata through that same client. If the read fails, the run stops with *manifest not usable, nothing was archived*, so no tars without manifest rows (orphans) are left behind.
+- **Prepare instance** runs the same read-only check and reports `pyarrow S3 TLS ok`.
+- If you still see the error, set `SSL_CERT_FILE` to your distribution's CA bundle in the environment that runs the archiver.
+
 ## 9. Failed files and retry
 
 Files that can't be archived don't stop the run. A file can fail because it's unreadable, it was deleted, or its tar upload failed. Each failure is recorded, and the job shows **completed — N files failed**.
@@ -240,6 +321,8 @@ Files that can't be archived don't stop the run. A file can fail because it's un
 ![Retry completed](docs/images/52-retry-done.png)
 
 Symlinks and special files are reported as *skipped*, not failed, and are not retried.
+
+**Resume vs Retry.** *Retry failed files* re-sends only the files that failed in a job that ran to the end. *Resume* (for cancelled or failed jobs) re-runs the whole job and skips what that run already archived, including files the scan never reached before it stopped.
 
 The **Log** tab has the full detail for every job, including the failed-list location and the run summary:
 
@@ -273,16 +356,70 @@ The **Log** tab has the full detail for every job, including the failed-list loc
 
 ### IAM permissions
 
-| Use | Permissions |
-|---|---|
-| Archive | S3 Tables read/write on the table bucket (see the main README §2) and `s3:PutObject` on the tar bucket |
-| Browse and restore | S3 Tables read, `s3:ListBucket` and `s3:GetObject` on the tar bucket |
-| Setup wizard | `s3tables:ListTableBuckets`, `CreateTableBucket`, `CreateNamespace`, `CreateTable`, `s3:ListAllMyBuckets`, `CreateBucket`, `PutBucketPublicAccessBlock`, `PutEncryptionConfiguration`, `PutBucketOwnershipControls` |
-| All | `sts:GetCallerIdentity` (credential check; the result is never displayed) |
+Example least-privilege policies, one per role. Replace `<tar-bucket>`, `<prefix>`, `<table-bucket>`, `<region>` and `<account>`. Keep the wizard's create permissions separate from day-to-day use. These examples follow the calls the code makes but have not yet been tested with a restricted role, so try them on a test account first.
+
+**Archiver** (Archive → and the CLI archiver):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "TarObjects", "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:AbortMultipartUpload", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::<tar-bucket>/<prefix>/*" },
+    { "Sid": "Manifest", "Effect": "Allow",
+      "Action": ["s3tables:GetTableBucket", "s3tables:ListNamespaces", "s3tables:GetNamespace",
+                 "s3tables:CreateNamespace", "s3tables:ListTables", "s3tables:CreateTable",
+                 "s3tables:GetTable", "s3tables:GetTableMetadataLocation",
+                 "s3tables:UpdateTableMetadataLocation", "s3tables:PutTableData",
+                 "s3tables:GetTableData"],
+      "Resource": ["arn:aws:s3tables:<region>:<account>:bucket/<table-bucket>",
+                   "arn:aws:s3tables:<region>:<account>:bucket/<table-bucket>/table/*"] },
+    { "Sid": "WhoAmI", "Effect": "Allow", "Action": "sts:GetCallerIdentity", "Resource": "*" }
+  ]
+}
+```
+
+`s3:GetObject` on the tars is used for the end-to-end tar check (`--verify-tar-upload`): a HeadObject after each upload. Without it, tars still upload with S3-checked CRC64NVME checksums, but the run summary reports them as *not checked*.
+
+**Browse and restore** (read-only):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "ListTars", "Effect": "Allow", "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<tar-bucket>",
+      "Condition": { "StringLike": { "s3:prefix": ["<prefix>/*", "<prefix>", ""] } } },
+    { "Sid": "ReadTars", "Effect": "Allow", "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<tar-bucket>/<prefix>/*" },
+    { "Sid": "ReadManifest", "Effect": "Allow",
+      "Action": ["s3tables:GetTableBucket", "s3tables:ListNamespaces", "s3tables:GetNamespace",
+                 "s3tables:ListTables", "s3tables:GetTable", "s3tables:GetTableMetadataLocation",
+                 "s3tables:GetTableData"],
+      "Resource": ["arn:aws:s3tables:<region>:<account>:bucket/<table-bucket>",
+                   "arn:aws:s3tables:<region>:<account>:bucket/<table-bucket>/table/*"] },
+    { "Sid": "WhoAmI", "Effect": "Allow", "Action": "sts:GetCallerIdentity", "Resource": "*" }
+  ]
+}
+```
+
+**Setup wizard** (one-time; use an admin or provisioning role, not the day-to-day one):
+
+- To list: `s3tables:ListTableBuckets` and `s3:ListAllMyBuckets`.
+- To create the table bucket and tables: `s3tables:CreateTableBucket`, `s3tables:CreateNamespace` and `s3tables:CreateTable`.
+- To create the tar bucket: `s3:CreateBucket`, `s3:PutBucketPublicAccessBlock`, `s3:PutEncryptionConfiguration`, `s3:PutBucketOwnershipControls`, `s3:PutBucketPolicy` (the HTTPS-only policy) and `s3:PutLifecycleConfiguration` (aborts interrupted multipart uploads after 7 days).
 
 ### Privacy on screen
 
-Everything the app displays passes through a masking filter: the header, log, status bar, error messages and command preview. It replaces 12-digit AWS account IDs and IAM/STS user, role and session names with `****`. The table bucket is always shown by name, never by ARN.
+The app masks account details in everything it shows from AWS or the archiver: the header line, the Log tab, the status bar, error messages and dialogs, job titles and the command preview.
+
+- **AWS account IDs** (12 digits) become `************`.
+- **IAM and STS user, role and session names**, and **access key and principal IDs** (`AKIA…`, `ASIA…`, `AROA…`), become `****`.
+- **Paths under your home folder** are shown as `~/…`.
+- **The table bucket** is shown by name, never by ARN.
+
+Two things are deliberately left unmasked: your AWS profile name, and paths you type or pick yourself, such as a report file or a restore destination outside your home folder.
 
 ### Older tables (created before the directory index)
 
@@ -318,8 +455,8 @@ WHERE parent_dir IS NULL;
 ### Notes
 
 - **Re-archived paths:** the Files view shows the newest copy with a `[N×]` badge. Folder totals count every run, so they include re-archived copies.
-- **Cancel:** pending manifest rows are committed before the archiver exits. Tars that were mid-upload can be left as orphans; the Tar objects view flags them. Reconcile as described in the main README §6.
+- **Cancel:** tars already being built or uploaded are finished and recorded, so cancelling never leaves orphan tars; tars not started yet are dropped. To continue later, select the job and click **Resume**: it runs the same job again, skipping every file the cancelled run already archived, so the set completes with no gaps and no duplicates (resumes can be chained). Clicking Cancel a second time force-stops without waiting, which may leave orphans that the Tar objects view flags.
 - **Keep the base folder stable:** archived paths are relative to "Store paths relative to". Using different bases for overlapping trees makes their paths collide (main README §6).
 - **Compressed tars:** they show `compressed` in *Byte range* and can't be restored file by file.
 - **Glacier and Deep Archive tars:** they need an S3 restore before the GUI can read them. Glacier Instant Retrieval works directly.
-- **Command line:** everything the GUI does is also available through `../fss3-archiver-s3tables-mp.py` and `../fss3-restore.py`; see the main README.
+- **Command line:** everything the GUI does is also available through `../archiver/fss3-archiver-s3tables-mp.py`, `../archiver/s3s3-archiver-s3tables-mp.py` and `../archiver/fss3-restore.py`; see the main README.

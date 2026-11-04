@@ -1,6 +1,6 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# run.sh — example invocations for the S3 Tables archiver / restore (v3).
+# run.sh — example invocations for the S3 Tables archiver / restore .
 #
 # Edit the shared variables below, then uncomment ONE function call at the
 # bottom and run:  bash run.sh
@@ -11,8 +11,9 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-ARCHIVER="python3 fss3-archiver-s3tables-mp.py"
-RESTORE="python3 fss3-restore.py"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # works from any folder
+ARCHIVER="python3 $HERE/fss3-archiver-s3tables-mp.py"
+RESTORE="python3 $HERE/fss3-restore.py"
 
 # --- shared config (edit these) --------------------------------------------
 REGION="ap-northeast-2"
@@ -171,10 +172,12 @@ function fstos3_parallel_runs () {
 
   local listdir; listdir="$(mktemp -d)"
   for sub in fs1 fs2 fs3 fs4; do
-    find "$SRC_PATH/$sub" -type f > "$listdir/$sub.txt"
+    # NUL-separated: safe for file names containing newlines
+    find "$SRC_PATH/$sub" -type f -print0 > "$listdir/$sub.lst0"
     $ARCHIVER \
         --src-path         "$SRC_PATH" \
-        --input-file       "$listdir/$sub.txt" \
+        --input-file       "$listdir/$sub.lst0" \
+        --input-format     nul \
         --dst-bucket       "$DST_BUCKET" \
         --dst-prefix       "$DST_PREFIX" \
         --max-size         20MB \

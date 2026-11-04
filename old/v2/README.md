@@ -42,7 +42,8 @@ pip install -r requirements.txt
 - To run the application, use the following command:
 
 ```bash
-streamlit run app.py --server.fileWatcherType none
+streamlit run app.py --server.fileWatcherType none --server.address 127.0.0.1
+# loopback only (no authentication); from another machine: ssh -L 8501:127.0.0.1:8501 <host>
 ```
 or
 

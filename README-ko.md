@@ -7,41 +7,42 @@
 원본은 [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution)이며, 이 버전은 매니페스트 저장을 CSV 오브젝트에서 S3 Tables로 전환하고, 단일 읽기 MD5·스트리밍 tar·배치 커밋·멀티프로세스 병렬화를 적용해 재구성했습니다.
 
 <p align="center">
-  <a href="v3/gui/docs/demo.mp4"><img src="v3/gui/docs/demo-preview.gif" width="860" alt="Demo: setup wizard, archiving 523,124 files, browsing, restore and an incremental run"></a><br>
-  <b>▶ 미리보기를 클릭하면 2분 데모 영상(MP4) 전체를 볼 수 있습니다</b>
+  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="1-minute intro: why small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
+  <b>▶ 미리보기를 클릭하면 1분 소개 영상(MP4, AWS에서 녹화)을 볼 수 있습니다</b>
 </p>
 
 ## 데스크톱 GUI — 여기서 시작하세요
 
-가장 쉬운 사용 방법은 [`v3/gui`](v3/gui/README.md)의 데스크톱 앱입니다. 모든 화면의 단계별 설명은 **[GUI 사용자 가이드](v3/gui/README.md)**(영문)를 참고하세요.
+가장 쉬운 사용 방법은 [`gui`](gui/README.md)의 데스크톱 앱입니다. 모든 화면의 단계별 설명은 **[GUI 사용자 가이드](gui/README.md)**(영문)를 참고하세요.
 
-![메인 화면: 왼쪽은 로컬 디스크, 오른쪽은 아카이브의 원본 파일, 아래는 작업 모니터링](v3/gui/docs/images/21-browse-files.png)
+![메인 화면: 왼쪽은 로컬 디스크, 오른쪽은 아카이브의 원본 파일, 아래는 작업 모니터링](gui/docs/images/21-browse-files.png)
 
-▶ **[2분 데모 영상](v3/gui/docs/demo.mp4)**: 설정, 파일 523,124개 아카이빙, 탐색, 복원, incremental 실행.
+▶ **[1분 소개 영상](gui/docs/demo.mp4)**: 소용량 파일이 왜 비싼지, 그리고 설정, EC2에서 S3 버킷의 객체 482,980개 아카이빙, 탐색, 복원. **[2분 둘러보기](gui/docs/demo-walkthrough.mp4)**: 로컬 디스크의 파일 523,124개 아카이빙, 탐색, 복원, incremental 실행.
 
 ```bash
-cd v3/gui && ./run-gui.sh      # 첫 실행 시 자체 Python 환경을 만듭니다
+cd gui && ./run-gui.sh      # 첫 실행 시 자체 Python 환경을 만듭니다
 ```
 
-1. **설정:** 첫 실행 마법사가 S3 Tables table bucket, 매니페스트 테이블, 비공개 tar 버킷을 이름으로 선택하거나 생성합니다. ARN을 찾을 필요가 없습니다. → [가이드 §2](v3/gui/README.md#2-first-run-setup-wizard)
-2. **아카이빙:** 왼쪽에서 폴더를 선택하고 **Archive →**를 누릅니다. 처리 중인 tar마다 번들링/업로드 진행 막대가 표시됩니다. → [§4](v3/gui/README.md#4-archive-files)
-3. **탐색:** 오른쪽 패널에 **원본 파일과 폴더**가 보이고, 각 파일이 담긴 tar와 byte 범위도 표시됩니다. **Tar objects**로 전환하면 tar 자체를 볼 수 있습니다. → [§5](v3/gui/README.md#5-browse-the-archive)
-4. **복원:** 오른쪽에서 파일이나 폴더를 선택하고 **← Restore**를 누릅니다. 필요한 byte 범위만 가져오고 MD5를 검증합니다. → [§6](v3/gui/README.md#6-restore-files)
+1. **설정:** 첫 실행 마법사가 S3 Tables table bucket, 매니페스트 테이블, 비공개 tar 버킷을 이름으로 선택하거나 생성합니다. ARN을 찾을 필요가 없습니다. → [가이드 §2](gui/README.md#2-first-run-setup-wizard)
+2. **아카이빙:** 왼쪽에서 폴더를 선택하고 **Archive →**를 누릅니다. 처리 중인 tar마다 번들링/업로드 진행 막대가 표시됩니다. → [§4](gui/README.md#4-archive-files)
+3. **탐색:** 오른쪽 패널에 **원본 파일과 폴더**가 보이고, 각 파일이 담긴 tar와 byte 범위도 표시됩니다. **Tar objects**로 전환하면 tar 자체를 볼 수 있습니다. → [§5](gui/README.md#5-browse-the-archive)
+4. **복원:** 오른쪽에서 파일이나 폴더를 선택하고 **← Restore**를 누릅니다. 필요한 byte 범위만 가져오고 MD5를 검증합니다. → [§6](gui/README.md#6-restore-files)
 
-GUI에서는 [incremental 실행](v3/gui/README.md#7-incremental-archiving), [파일 목록 리포트 입력](v3/gui/README.md#8-archive-from-a-file-list-report), [실패 파일 원클릭 재시도](v3/gui/README.md#9-failed-files-and-retry)도 지원합니다.
+GUI에서는 [incremental 실행](gui/README.md#7-incremental-archiving), [파일 목록 리포트 입력](gui/README.md#8-archive-from-a-file-list-report), [실패 파일 원클릭 재시도](gui/README.md#9-failed-files-and-retry)도 지원합니다.
 
 | 설정 마법사 | 아카이빙 진행 중 |
 |---|---|
-| ![마법사](v3/gui/docs/images/06-wizard-applied.png) | ![진행 상황](v3/gui/docs/images/12-archiving-progress.png) |
+| ![마법사](gui/docs/images/06-wizard-applied.png) | ![진행 상황](gui/docs/images/12-archiving-progress.png) |
 
 이 문서의 나머지 부분은 GUI가 내부에서 실행하는 명령줄 아카이버와 복원 스크립트를 설명합니다.
 
 ### 주요 기능
 
 - **데스크톱 GUI** — 설정 마법사, 이중 패널 탐색(원본 파일 ↔ tar 객체), tar별 진행 상황을 보여주는 아카이빙/복원, incremental 실행, 리포트 입력, 실패 파일 재시도. 위 내용 참고.
+- **S3 버킷 소스** — 버킷/prefix, S3 Inventory 또는 s3tar 매니페스트의 객체를 256개 동시 GET으로 아카이빙하며, 각 객체를 S3가 저장한 체크섬과 대조합니다. §3 참고.
 - **파일 번들링** — 다수의 소용량 파일을 큰 tar 오브젝트로 묶어 PUT 요청 수를 줄이고 소용량 과금 페널티(예: Glacier IR 128KB 최소 과금)를 회피.
 - **S3 Tables 매니페스트** — 각 파일의 `tar_key` + byte 범위를 관리형 Apache Iceberg 테이블에 기록해, tar 안의 개별 파일을 계속 찾을 수 있게 함.
-- **개별 파일 직접 복원** — tar 전체를 내려받지 않고 byte-range GET으로 tar에서 파일 하나만 바로 추출(`v3/fss3-restore.py`).
+- **개별 파일 직접 복원** — tar 전체를 내려받지 않고 byte-range GET으로 tar에서 파일 하나만 바로 추출(`fss3-restore.py`).
 - **두 가지 입력 모드** — 디렉터리 순회(`--src-path`), 또는 지정한 파일 목록을 아카이빙하는 `--input-file`(DB export·`find`·변경 목록 등).
 - **파일별 MD5 무결성** — 모든 파일을 해싱(단일 읽기, `--md5`)해 매니페스트에 저장하므로 복원 시 바이트 단위로 검증 가능. 아카이브에 무결성 검증은 필수이므로 항상 켜세요.
 - **멀티프로세스 병렬화** — tar 패킹·업로드를 워커 프로세스로 병렬화해 GIL 우회; 매니페스트 커밋은 배치로 묶어 Iceberg 작은 파일·스냅샷 폭증 방지.
@@ -77,7 +78,7 @@ GUI에서는 [incremental 실행](v3/gui/README.md#7-incremental-archiving), [�
                         └─ 단일 writer 스레드 → S3 Tables 배치 커밋 (기본 50,000행)
 ```
 
-스크립트: `v3/fss3-archiver-s3tables-mp.py` (멀티프로세스). tar 패킹·MD5 등 CPU 작업은 워커 프로세스로 병렬화하여 GIL을 우회하고, 파일 스캔은 CPU가 아니라 지연에 묶이는 작업이므로 스레드로 병렬화합니다.
+스크립트: `fss3-archiver-s3tables-mp.py` (멀티프로세스). tar 패킹·MD5 등 CPU 작업은 워커 프로세스로 병렬화하여 GIL을 우회하고, 파일 스캔은 CPU가 아니라 지연에 묶이는 작업이므로 스레드로 병렬화합니다.
 
 설계 포인트:
 
@@ -101,7 +102,7 @@ GUI에서는 [incremental 실행](v3/gui/README.md#7-incremental-archiving), [�
 - 사전 생성된 S3 버킷(tar 저장용)과 S3 Tables 테이블 버킷(매니페스트용). 네임스페이스·테이블은 스크립트가 자동(idempotent) 생성.
 
 ```bash
-pip install "pyiceberg[pyarrow,pyiceberg-core]" boto3
+pip install -r archiver/requirements.txt   # boto3[crt]: fast CRC64NVME
 # 테스트 검증: pyiceberg 0.11.1 / pyarrow 18.1.0 / boto3 1.39.17
 # pyiceberg 0.12 이상은 day 파티션 테이블에 append하려면 pyiceberg-core extra가 필요 (0.12.0 / pyarrow 26.0.0 / boto3 1.43에서도 검증)
 ```
@@ -116,18 +117,21 @@ s3tables:PutTableData, GetTableData
 + tar 저장 버킷에 대한 s3:PutObject
 ```
 
+> 최소 권한 IAM 정책 예시(아카이버, 탐색/복원, 설정 마법사): [GUI 가이드의 IAM permissions](gui/README.md#iam-permissions) 참고.
+
+
 ---
 
 ## 3. 실행 방법
 
 모든 실행은 **파일 소스**(`--src-path` 순회 또는 `--input-file` 목록)와 **배치 기준**(`--max-size` 또는 `--max-files`)의 조합입니다. 아래 시나리오는 대상/S3 Tables 관련 플래그를 공유하며, 소스와 배치 선택만 달라집니다.
 
-> 💡 [`v3/run.sh`](v3/run.sh)에 아래 모든 시나리오(+복원)를 바로 실행 가능한 bash 함수로 담아 뒀습니다 — 상단 공용 변수를 수정하고, 함수 호출 한 줄의 주석을 해제한 뒤 `bash run.sh`로 실행하세요.
+> 💡 [`archiver/run.sh`](archiver/run.sh)에 아래 모든 시나리오(+복원)를 바로 실행 가능한 bash 함수로 담아 뒀습니다 — 상단 공용 변수를 수정하고, 함수 호출 한 줄의 주석을 해제한 뒤 `bash run.sh`로 실행하세요.
 
 **기본 — 디렉터리를 균일 크기 tar로 번들링 (가장 일반적):**
 
 ```bash
-python v3/fss3-archiver-s3tables-mp.py \
+python archiver/fss3-archiver-s3tables-mp.py \
   --src-path         /data/nfsshare \
   --dst-bucket       your-own-dest-bucket \
   --dst-prefix       20260804 \
@@ -156,7 +160,7 @@ python v3/fss3-archiver-s3tables-mp.py \
   --input-file files-to-archive.txt --max-files 1000
 ```
 
-한 줄에 절대 경로 하나(빈 줄·`#` 주석은 건너뜀). 존재하지 않거나 읽을 수 없는 경로는 실패로 집계되어 실패 파일 목록에 기록되고, 심볼릭 링크와 일반 파일이 아닌 항목은 건너뜁니다. 어느 쪽도 실행을 멈추지 않습니다. CSV/TSV 리포트도 입력으로 쓸 수 있습니다(`--input-format` / `--path-column` 참고). `--src-path`는 여전히 필수 — 각 tar 멤버의 상대 경로 기준이며, 파일이 `--src-path` 하위에 있으면 그 기준 상대 경로로, 아니면 앞의 `/`를 뗀 전체 경로로 저장됩니다.
+한 줄에 절대 경로 하나(빈 줄·`#` 주석은 건너뜀). 존재하지 않거나 읽을 수 없는 경로는 실패로 집계되어 실패 파일 목록에 기록되고, 심볼릭 링크와 일반 파일이 아닌 항목은 건너뜁니다. 어느 쪽도 실행을 멈추지 않습니다. CSV/TSV 리포트도 입력으로 쓸 수 있습니다(`--input-format` / `--path-column` 참고). `--src-path`는 여전히 필수 — 각 tar 멤버의 상대 경로 기준이며, 경로는 `--src-path` 안으로 해석되어야 합니다(심볼릭 링크 상위 폴더와 `..`를 먼저 해석). 밖에 있는 경로는 거부되어 실패로 기록되며, `--allow-outside-src`를 주면 앞의 `/`를 뗀 전체 경로로 저장됩니다. `find -print0`로 만든 목록은 어떤 파일 이름에도 안전한 `--input-format nul`을 사용하세요.
 
 **콜드·write-once 데이터 — 압축:**
 
@@ -167,6 +171,79 @@ python v3/fss3-archiver-s3tables-mp.py \
 ⚠️ `--compress`는 byte-range 개별 복원을 비활성화하며(offset이 `-1`로 기록됨), `DEEP_ARCHIVE`는 읽기 전에 tar 전체 restore가 필요합니다 — 파일 단위로 다시 읽지 않을 아카이브에만 함께 쓰세요. [제약 사항](#제약-및-주의사항) 참고.
 
 파일 하나를 다시 꺼내는 방법은 [§4.2](#42-복구--byte-range-get으로-개별-파일-추출)에서 다룹니다(경로로 LOOKUP, 또는 알려진 offset으로 DIRECT).
+
+### S3 버킷을 소스로 아카이빙 (`s3s3-archiver-s3tables-mp.py`)
+
+같은 파이프라인, 매니페스트, 탐색기, 복원, incremental, Resume, 실패 파일 목록이 **S3 버킷을 소스로** 할 때도 그대로 동작합니다. 객체 단위로 저장하거나 차가운 클래스로 옮기기에는 비용이 큰, 소용량 객체가 가득한 버킷에 사용하세요.
+
+> ⚠️ **노트북이 아니라 소스 버킷과 같은 리전에서 실행하세요.** 아카이버가 S3에서 AWS 밖의 컴퓨터로 읽어 오는 모든 바이트는 **S3 데이터 전송(DTO)** 요금이 붙습니다. 서울 기준 월 첫 10 TB까지 약 $0.126/GB로, **TB당 약 $129**, **10 PB면 약 130만 달러**입니다. 같은 리전의 EC2(또는 CloudShell)에서는 GET 요청 요금 외에 읽기 비용이 없고, 속도도 몇 배 빠릅니다. 퍼블릭 서브넷이나 S3 Gateway VPC 엔드포인트를 사용하세요. NAT Gateway는 약 $0.059/GB가 과금됩니다. GUI는 **Run on**이 *This computer*일 때 이 경고를 다시 보여 줍니다. [EC2에서 실행하는 두 가지 방법](#ec2에서-실행하는-두-가지-방법) 참고.
+
+```bash
+python archiver/s3s3-archiver-s3tables-mp.py \
+  --src-s3           s3://source-bucket/data/fs1/ \
+  --src-prefix       data/ \
+  --dst-bucket       your-own-dest-bucket \
+  --dst-prefix       s3-archive \
+  --max-size         256MB \
+  --num-workers      8 \
+  --get-concurrency  256 \
+  --region           ap-northeast-2 \
+  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>
+```
+
+| 옵션 | 의미 | 기본값 |
+|---|---|---|
+| `--src-s3 s3://bucket/prefix` | prefix 아래의 모든 객체를 아카이빙: `/` 기준으로 나눠 병렬 `ListObjectsV2` 순회 | — |
+| `--src-manifest FILE` | **s3tar CSV**(`bucket,key,size[,etag]`), **S3 Inventory** `manifest.json`(CSV 또는 Parquet), 또는 한 줄에 `s3://bucket/key` 하나(실패 파일 목록)에 나열된 객체를 아카이빙. 로컬 경로 또는 `s3://` | — |
+| `--src-prefix` | 키를 이 prefix 기준 상대 경로로 저장: 목록 prefix(기본값), 상위 prefix(`data/`면 `fs1/…` 유지), 또는 `""`(전체 키) | 목록 prefix |
+| `--get-concurrency` | 소스 GET 동시 요청 수(전체), `--num-workers` 프로세스에 나눠 배분 | 256 |
+| `--get-client` | 32 MiB 미만 객체의 소스 GET 클라이언트: `crt`(AWS CRT S3 클라이언트, 네이티브 코드) 또는 `boto3`. 더 큰 객체는 항상 boto3로 스트리밍 | `crt` |
+| `--list-threads` | 병렬 목록 조회 / HeadObject 스레드 수 | 16 |
+| `--verify-source-checksum` | 각 객체의 바이트를 S3가 저장한 전체 객체 체크섬(CRC64NVME, CRC32C, CRC32, SHA256, SHA1)과 비교. 다르면 해당 객체는 실패 처리 | on |
+| `--src-region` | 소스 버킷의 리전 | `--region` |
+
+대상, 번들링, 업로드, 매니페스트, `--incremental`(LastModified 기준), `--resume-run`, `--part-size` 옵션은 로컬 아카이버와 같습니다.
+
+**시간이 어디에 쓰이는가.** 소용량 객체는 작업을 **GET 바운드**로 만듭니다. 리전 안에서 객체당 요청 1건, 건당 약 10~20 ms입니다. 그래서 각 워커는 배치를 많은 동시 GET으로 가져와 순서대로 tar에 씁니다. S3는 prefix 파티션당 초당 약 5,500건의 GET을 처리하며, `503 SlowDown` 응답은 백오프와 지터를 적용한 재시도로 흡수합니다.
+
+boto3로 프로파일링해 보니 병목은 **네트워크가 아니라 CPU**였습니다. CPU의 약 60%가 botocore의 요청당 처리(적응형 재시도 속도 제한기, `Last-Modified` 파싱, Python의 HTTP·TLS)에 쓰였고, 체크섬 검증은 약 5%였습니다. 기본값 `--get-client crt`는 소용량 객체 GET을 AWS CRT S3 클라이언트로 보냅니다. 서명, 송수신을 네이티브 코드에서 처리합니다. 여전히 객체당 일반 GET 1건이므로 S3가 같은 전체 객체 체크섬 헤더를 돌려주고, CRC64NVME 비교 방식도 그대로입니다.
+
+`ap-northeast-2`의 EC2(Amazon Linux 2023, SSM으로 실행)에서 실측: 객체 523,124개(9.95 GiB), 객체당 정확히 GET 1건, 모든 체크섬 검증, 실패 0건.
+
+| 인스턴스 | 클라이언트 | 워커 / GET | 처리량 |
+|---|---|---|---|
+| m5.2xlarge (vCPU 8) | boto3 (이전) | 8 / 256 | 35.5 MB/s |
+| m5.2xlarge | crt | 8 / 256 | 77.8 MB/s |
+| m5.2xlarge | crt | 16 / 512 | 92.0 MB/s |
+| c6in.8xlarge (vCPU 32) | crt | 32 / 1024 | 167.5 MB/s |
+| c6in.8xlarge | crt | 48 / 1536 | **180.8 MB/s** |
+
+처리량은 vCPU 수에 따라 늘어납니다. 워커는 vCPU + 16개(vCPU당 최대 2개), 워커당 GET 32개로 시작하면 좋습니다. GUI에서 인스턴스를 고르면 이 값이 자동으로 채워집니다. c6in에서 fs1 실행은 약 1분이라, 시작과 목록 조회 램프업 시간이 이 평균에 포함되어 있습니다.
+
+**체크섬.** CRC64NVME는 각 객체가 tar로 스트리밍되는 동안 계산되어 S3 고유 인코딩으로 저장됩니다. 그래서 소스 객체의 `x-amz-checksum-crc64nvme`나 **S3 Batch Operations "compute checksum"** 리포트와 바로 비교할 수 있습니다. S3는 새로 업로드되는 객체에 기본으로 전체 객체 CRC64NVME를 붙입니다. 테스트에서는 523,124개 객체 모두 이 체크섬을 갖고 있었고, 2,000개 샘플이 정확히 일치했습니다. *복합(composite, 멀티파트)* 체크섬만 가진 객체는 바이트 단위 비교가 불가능하므로 비교 없이 아카이빙됩니다.
+
+#### EC2에서 실행하는 두 가지 방법
+
+두 방법 모두 GUI의 **Archive from S3** 대화상자에서 시작하며, GUI가 쓰는 것과 정확히 같은 버전의 아카이버를 실행합니다. 아카이버는 `s3://<tar 버킷>/_sfa/runner/<버전>/`에 올라가고, 인스턴스는 이를 전용 Python 3.12 환경에 한 번만 설치합니다(미리 빌드된 wheel만 사용).
+
+| | **A. SSM으로 EC2에서 실행** (권장) | **B. 스크립트를 복사해 직접 실행** |
+|---|---|---|
+| 방법 | **Run on**에서 인스턴스를 고르고 **Start archiving** | **Copy script for EC2**를 누르고, 인스턴스의 터미널(SSH, Session Manager, EC2 Instance Connect)에 붙여 넣기 |
+| 필요 조건 | 인스턴스가 Systems Manager에서 Online이고, GUI 사용자가 그 인스턴스에 `ssm:SendCommand` 가능 | 인스턴스의 셸만 있으면 됨 |
+| 진행 상황 | GUI에서 진행 막대, 속도, ETA, 로그를 실시간으로 확인. GUI를 닫았다 다시 열면 다시 연결됨 | 스크립트가 출력한 로그 파일을 `tail -f` |
+| 취소 / 재개 | GUI의 버튼 | `kill -INT <pid>`(정상 취소). 재개는 `RESUME_OF=<run id>`를 넣어 스크립트를 다시 붙여 넣기 |
+| 적합한 경우 | 일상적인 실행 | SSM을 쓸 수 없을 때, 예약 실행, CloudShell, 여러 인스턴스가 소스를 나눠 아카이빙할 때 |
+
+- **인스턴스 역할:** 아카이버 권한([GUI 가이드의 IAM](gui/README.md#iam-permissions) 참고)과 tar 버킷의 `_sfa/runner/*`에 대한 `s3:GetObject`. A는 추가로 `_sfa/jobs/*`에 대한 `s3:PutObject`(진행 상황)와 `AmazonSSMManagedInstanceCore`.
+- **크기:** 워커는 vCPU + 16개(vCPU당 최대 2개), 워커당 GET 32개. 인스턴스를 고르면 대화상자가 이 값을 채워 줍니다(위 표 참고).
+- **네트워크:** 퍼블릭 서브넷이나 S3 Gateway VPC 엔드포인트를 사용하고, NAT Gateway는 피하세요.
+- **GUI 없이:** 인스턴스에서 `pip install -r archiver/requirements.txt` 후 이 절 맨 위의 명령을 실행하세요.
+
+두 방법의 단계별 안내: [GUI 가이드의 Run on EC2](gui/README.md#run-on-ec2-no-data-transfer-out).
+
+GLACIER 또는 DEEP_ARCHIVE 객체는 "restore it in S3 first"로 실패 처리됩니다. 폴더 마커는 건너뜁니다. `../x`처럼 상대 경로로 쓸 수 없는 키는 거부됩니다. 소스는 절대 수정하거나 삭제하지 않습니다.
+
+소스용 추가 IAM: 소스 버킷에 대한 `s3:ListBucket`(`s3:prefix` 조건 포함), `arn:aws:s3:::<source-bucket>/<prefix>*`에 대한 `s3:GetObject`, 그리고 `--src-manifest`로 S3 Inventory를 쓰는 경우 인벤토리 버킷에 대한 `s3:GetObject`.
 
 ### 주요 파라미터
 
@@ -191,11 +268,15 @@ python v3/fss3-archiver-s3tables-mp.py \
 | `--progress` | JSON 진행 상황 스냅샷을 stdout에 출력 (`@@PROGRESS ` 접두사); GUI가 사용 | off |
 | `--incremental` | **같은 소스**(동일한 `--src-path` + `--walk-path` 조합)의 마지막 성공(`ok`/`partial`) 실행 시작 시각 이후 mtime **또는** ctime이 바뀐 파일만 아카이빙 (`<table-name>_runs`에서 조회). ctime으로 이름 변경/이동도 감지. 소스의 첫 실행은 전체를 아카이빙. `--input-file`과 함께 쓸 수 없음 | off |
 | `--watermark-skew` | 호스트/파일 서버 간 시계 차이를 흡수하기 위해 워터마크에서 빼는 초; 겹치는 구간의 파일은 다시 아카이빙될 뿐 누락되지 않음 | 300 |
-| `--input-format` | `--input-file` 형식: `lines`(한 줄에 경로 하나), `csv`, `tsv`(파일 목록 리포트); `auto`는 확장자로 판단; `.gz`는 자동으로 해제 | auto |
+| `--input-format` | `--input-file` 형식: `lines`(한 줄에 경로 하나), `nul`(NUL 구분, `find -print0`), `csv`, `tsv`(파일 목록 리포트); `auto`는 확장자로 판단; `.gz`는 자동으로 해제 | auto |
+| `--resume-run` | 중단된(취소·실패) 실행을 이어서 진행: 같은 소스를 다시 아카이빙하되 그 실행이 이미 아카이빙한 파일은 건너뛰므로 누락도 중복도 없음. 여러 번 이어 받은 경우 반복 지정. 그 실행의 파일 이름 집합을 메모리에 둠(파일당 약 100 B). GUI: **Resume** | — |
+| `--allow-outside-src` | `--src-path` 밖으로 해석되는 `--input-file` 경로도 허용 (기본은 거부 — 목록으로 호스트의 다른 파일을 끌어오지 못하게 함) | off |
 | `--path-column` | csv/tsv 리포트에서 경로가 들어 있는 컬럼: 헤더 이름(예: `path`) 또는 0부터 시작하는 인덱스. 상대 경로는 `--src-path` 기준 | 0 |
 | `--run-history` / `--no-run-history` | 모든 실행(상태, 건수, 워터마크, 실패 목록 위치)을 `<table-name>_runs`에 기록; `--incremental`에 필요 | on |
 | `--tar-storageclass` | tar 오브젝트 스토리지 클래스 (아래 참고) | STANDARD |
 | `--part-size` | 멀티파트 업로드 part 크기(단일 PUT 임계값 겸용): `8MB`, `16MB`, `32MB`, `64MB`. part마다 요청이 과금됨 — §5.3 참고 | 32MB |
+| `--upload-client` | tar 업로드 클라이언트: `crt`(AWS CRT S3 클라이언트, 네이티브 TLS·멀티파트) 또는 `boto3`. 둘 다 CRC64NVME 체크섬을 보내고 S3가 요청마다 검사 | `crt` |
+| `--verify-tar-upload` / `--no-verify-tar-upload` | 업로드 후 S3가 저장한 tar 전체 객체 CRC64NVME를 패킹한 바이트의 CRC64NVME와 비교(tar당 HeadObject 1건, tar에 대한 `s3:GetObject` 필요). 다르면 해당 tar는 실패 처리되고 행이 기록되지 않음 | on |
 | `--tar-layout` | `--dst-prefix` 아래 tar 폴더 구조: `run` = `<prefix>/<run-id>/`(실행마다 폴더 하나 — full/incremental 실행을 단위로 확인·정합성 점검·정리), `date` = `<prefix>/<YYYYMMDD>/`(이전 방식), `flat` = `<prefix>/`. 매니페스트에 tar 전체 키가 저장되므로 기존 아카이브는 그대로 동작 | run |
 | `--spool-max-mb` | tar를 메모리에 두는 임계(초과 시 디스크) | 256 |
 | `--compress` | tar를 gzip 압축 (⚠️ 아래 제약 참고) | off |
@@ -203,7 +284,7 @@ python v3/fss3-archiver-s3tables-mp.py \
 **실패 파일과 재시도.** 아카이빙하지 못한 모든 파일은 `logs/<dst-prefix>/failed_<run-id>.txt`에 한 줄에 절대 경로 하나씩 스트리밍으로 기록됩니다. stat 오류, 읽을 수 없는 파일, 업로드에 실패한 tar에 들어 있던 모든 파일이 대상입니다. 옆의 `.tsv`에는 실패 사유가 남습니다. 같은 설정으로 재시도하세요:
 
 ```bash
-python v3/fss3-archiver-s3tables-mp.py --src-path <동일한 기준 경로> \
+python archiver/fss3-archiver-s3tables-mp.py --src-path <동일한 기준 경로> \
   --input-file logs/<dst-prefix>/failed_<run-id>.txt ...   # 동일한 병렬 파이프라인
 ```
 
@@ -309,14 +390,14 @@ WHERE source_key LIKE '%file0499%'
 
 ### 4.2 복구 — byte-range GET으로 개별 파일 추출
 
-`v3/fss3-restore.py`를 사용합니다. 파일이 담긴 byte 범위만 가져옵니다 — 아카이버가 `byte_start`를 파일의 tar 헤더에, `byte_end`를 패딩 끝에 기록하므로, 이 범위는 그 자체로 완결된 단일 멤버 tar가 되어 `tarfile`이 바로 열 수 있습니다. tar 전체를 내려받지 않습니다.
+`fss3-restore.py`를 사용합니다. 파일이 담긴 byte 범위만 가져옵니다 — 아카이버가 `byte_start`를 파일의 tar 헤더에, `byte_end`를 패딩 끝에 기록하므로, 이 범위는 그 자체로 완결된 단일 멤버 tar가 되어 `tarfile`이 바로 열 수 있습니다. tar 전체를 내려받지 않습니다.
 
 **참고:** 매니페스트에는 `tar_key`만 있고 **버킷 이름은 저장되지 않으므로** `--tar-bucket`은 항상 필수입니다.
 
 **DIRECT 모드** — offset을 이미 알고 있을 때(예: 4.1 조회 결과):
 
 ```bash
-python v3/fss3-restore.py \
+python archiver/fss3-restore.py \
   --tar-bucket       your-own-dest-bucket \
   --tar-key          20260804/20260804/archive_20260804_120000_31417_a3f1_00001.tar \
   --byte-start       1536 \
@@ -327,7 +408,7 @@ python v3/fss3-restore.py \
 **LOOKUP 모드** — 원본 경로만 알 때. 스크립트가 매니페스트를 조회(정확한 `source_key` 일치 + Iceberg predicate pushdown — 전체 스캔 없음)하여 offset을 직접 찾습니다:
 
 ```bash
-python v3/fss3-restore.py \
+python archiver/fss3-restore.py \
   --region           ap-northeast-2 \
   --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
   --namespace        small_files_archive \
@@ -423,7 +504,7 @@ single-pass 해싱은 추가 읽기가 없어(tar 생성을 위해 어차피 읽
 
 전체 tar 중 첫·중간·마지막 등 샘플에서 파일을 뽑아, S3 Tables 매니페스트의 offset으로 실제 tar를 byte-range 복원한 결과 **파일명·크기·MD5 전부 일치**. single-pass MD5와 tar 물리 offset의 정확성을 실제 S3에서 확인했습니다.
 
-`v3/fss3-restore.py` 스크립트 자체도 실제 S3 + S3 Tables(매니페스트 523,123행, MD5 on)에서 end-to-end로 검증했습니다. **DIRECT**·**LOOKUP** 두 모드 모두 byte-range GET으로 개별 파일을 복원했고, 추출한 바이트는 매니페스트 MD5와 일치하며 **원본과 `cmp` 바이트 단위로 동일**했습니다. 실패 경로도 정상 동작 — 잘못된 `--verify-md5`, 존재하지 않는 `source_key`, 두 모드 동시 지정 모두 명확한 메시지와 함께 0이 아닌 exit code로 종료됐습니다.
+`fss3-restore.py` 스크립트 자체도 실제 S3 + S3 Tables(매니페스트 523,123행, MD5 on)에서 end-to-end로 검증했습니다. **DIRECT**·**LOOKUP** 두 모드 모두 byte-range GET으로 개별 파일을 복원했고, 추출한 바이트는 매니페스트 MD5와 일치하며 **원본과 `cmp` 바이트 단위로 동일**했습니다. 실패 경로도 정상 동작 — 잘못된 `--verify-md5`, 존재하지 않는 `source_key`, 두 모드 동시 지정 모두 명확한 메시지와 함께 0이 아닌 exit code로 종료됐습니다.
 
 ---
 
@@ -450,7 +531,7 @@ single-pass 해싱은 추가 읽기가 없어(tar 생성을 위해 어차피 읽
 # run_id는 각 실행이 자동으로 고유하게 받음.
 for sub in fs1 fs2 fs3; do
   find /data/nfsshare/$sub -type f > /tmp/list.$sub
-  python3 v3/fss3-archiver-s3tables-mp.py \
+  python3 archiver/fss3-archiver-s3tables-mp.py \
       --src-path /data/nfsshare --input-file /tmp/list.$sub ... &
 done
 wait
@@ -461,7 +542,7 @@ wait
 **네임스페이스와 테이블은 미리 한 번 만들어 두세요.** 여러 실행이 생성 시점에 경합하지 않도록 합니다.
 
 ```bash
-python3 v3/fss3-archiver-s3tables-mp.py --src-path /empty/dir --max-files 1 ...  # ns + 테이블 생성
+python3 archiver/fss3-archiver-s3tables-mp.py --src-path /empty/dir --max-files 1 ...  # ns + 테이블 생성
 ```
 
 **커밋 빈도를 확인하세요.** 각 실행은 `--batch-size` 행 또는 `--flush-interval` 초 중 먼저 도달한 쪽에서 커밋합니다. 한 테이블에 실행이 많을 때는 `--flush-interval`을 올려 커밋 빈도를 낮추면 충돌 확률과 스냅샷 증가가 함께 줄어듭니다. 실행 요약에 `N commits (M commit retries)`가 출력되는데 `M`이 충돌 지표이고, 실행 중에는 로그의 `manifest-writer: append failed` 경고가 같은 신호입니다.
@@ -486,4 +567,5 @@ fan-out을 구성하기 전에 확인할 값어치가 있습니다. 200GB gp2 �
 - **처리율은 네트워크 대역폭에 좌우됩니다.** 온프레미스 → S3 전송 시에는 대역폭이 병목이 될 수 있습니다.
 - **대량 처리 시 `--batch-size`를 크게 유지하세요** (기본 50,000). 작은 값은 매니페스트에 작은 파일이 많아져 조회 성능이 떨어질 수 있습니다.
 - **tar 업로드와 매니페스트 커밋은 원자적이지 않습니다.** tar가 업로드된 뒤 해당 행이 S3 Tables에 커밋되기 전에 프로세스가 죽으면, 그 tar는 고아(orphan)가 됩니다 — 저장은 됐지만 조회·복원이 불가합니다. 실행 후 고아를 찾으려면 대상 prefix 아래의 tar 오브젝트와 매니페스트의 고유 `tar_key` 값을 대조하세요.
+- **Amazon Linux / RHEL / SUSE에서는 매니페스트를 기록하는 pyarrow S3 클라이언트가 `curlCode: 60` TLS 오류로 실패할 수 있습니다.** 이 클라이언트는 Debian의 CA 경로를 찾기 때문입니다. 아카이버가 `SSL_CERT_FILE`을 시스템 번들로 자동 지정합니다. 또한 첫 tar를 업로드하기 전에 매니페스트에 접근할 수 있는지 확인하므로, 인증서 설정이 잘못되어도 orphan tar 없이 실행이 중단됩니다. 직접 지정하려면 `SSL_CERT_FILE`을 설정하세요.
 - 테스트는 Python 3.12.1 / pyiceberg 0.11.1 기준입니다.

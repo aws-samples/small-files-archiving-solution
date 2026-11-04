@@ -16,7 +16,12 @@ Scale notes (GB .. PB, up to billions of manifest rows):
 """
 import io
 import os
+import sys
+import base64
+import stat
+import json
 import re
+import uuid
 import time
 import importlib.util
 import hashlib
@@ -31,12 +36,13 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 
+CHECKSUM_FIELDS = ("checksum_algorithm", "checksum")
 FILE_FIELDS = ("source_key", "filesize", "archive_ts", "tar_key",
                "byte_start", "byte_end", "md5")
 
 
 ARCHIVER_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                             "fss3-archiver-s3tables-mp.py")
+                             "archiver", "fss3-archiver-s3tables-mp.py")
 _ARCHIVER = {}
 
 
@@ -52,6 +58,17 @@ def archiver_module(path=ARCHIVER_PATH):
     return _ARCHIVER[path]
 
 
+def archiver_core_module(path=ARCHIVER_PATH):
+    """archiver_core.py next to the archiver script: the table schemas live
+    there since the archiver was split into a shared core and two front ends.
+    Loading the script imports its core (it puts its own folder on sys.path)."""
+    mod = archiver_module(path)
+    core = sys.modules.get("archiver_core")
+    if core is None or not hasattr(core, "ICEBERG_SCHEMA"):
+        return mod                      # an older single-file archiver
+    return core
+
+
 _ACCOUNT_RE = re.compile(r"(?<![0-9])[0-9]{12}(?![0-9])")
 _ARN_ACCT_RE = re.compile(r"(arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:)[0-9]{12}")
 _PRINCIPAL_RE = re.compile(r"(arn:aws[a-z-]*:(?:iam|sts)::[^:\s]*:(?:user|role|assumed-role|group|federated-user)/)[^\s,;'\"]+")
@@ -59,6 +76,15 @@ _IDENT_RE = re.compile(r"(?i)\b(account|accountid|account_id|user ?id)\b(['\"]?\
 
 
 _HOME = os.path.expanduser("~").rstrip("/")
+_KEY_ID_RE = re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|APKA)[A-Z0-9]{16,17}\b")
+
+
+def tilde(path):
+    """Show a path under the home folder as ~/... (display only)."""
+    p = str(path or "")
+    if _HOME and _HOME != "/" and (p == _HOME or p.startswith(_HOME + "/")):
+        return "~" + p[len(_HOME):]
+    return p
 
 
 def mask(text):
@@ -72,6 +98,8 @@ def mask(text):
     if _HOME and _HOME != "/":
         text = re.sub(re.escape(_HOME) + r"(?=/|\b)", "~", text)
     text = _ARN_ACCT_RE.sub(r"\1************", text)
+    # access key / user / role ids encode the account: hide them too
+    text = _KEY_ID_RE.sub("****************", text)
     # IAM / STS principals: user, role and session names identify the account owner
     text = _PRINCIPAL_RE.sub(r"\1****", text)
     text = _IDENT_RE.sub(r"\1\2************", text)
@@ -173,6 +201,7 @@ class Manifest:
         self._lock = threading.Lock()
         self.has_index = None
         self.unindexed_rows = False
+        self.file_fields = FILE_FIELDS
         # True until the first archive run creates namespace + table; the
         # browser then shows an empty archive instead of a connection error.
         self.table_missing = False
@@ -197,6 +226,9 @@ class Manifest:
             self.unindexed_rows = False
             return False, {}
         self.table_missing = False
+        cols = set(tbl.schema().column_names)
+        # tables from before the CRC64NVME columns still work, with MD5 only
+        self.file_fields = FILE_FIELDS + tuple(c for c in CHECKSUM_FIELDS if c in cols)
         has_col = "parent_dir" in tbl.schema().column_names
         has_dirs = False
         if has_col:
@@ -245,7 +277,7 @@ class Manifest:
                                      "archive_ts": r["archive_ts_max"]})
             mtbl = self._table()
             rows = mtbl.scan(row_filter=EqualTo("parent_dir", path),
-                             selected_fields=FILE_FIELDS,
+                             selected_fields=self.file_fields,
                              limit=limit + 1).to_arrow()
             out.files, out.truncated = self._files_from(rows, limit)
         else:
@@ -254,7 +286,7 @@ class Manifest:
             out.mode = "legacy"
             mtbl = self._table()
             flt = StartsWith("source_key", path + "/") if path else None
-            kw = {"selected_fields": FILE_FIELDS, "limit": legacy_scan_limit}
+            kw = {"selected_fields": self.file_fields, "limit": legacy_scan_limit}
             if flt is not None:
                 kw["row_filter"] = flt
             rows = mtbl.scan(**kw).to_arrow()
@@ -312,7 +344,7 @@ class Manifest:
         if self.table_missing:
             return [], False
         rows = self._table().scan(row_filter=StartsWith("source_key", prefix),
-                                  selected_fields=FILE_FIELDS,
+                                  selected_fields=self.file_fields,
                                   limit=limit + 1).to_arrow()
         return self._files_from(rows, limit)
 
@@ -330,7 +362,7 @@ class Manifest:
         if self.table_missing:
             return [], False
         rows = self._table().scan(row_filter=In("tar_key", self._tar_keys(tar_key)),
-                                  selected_fields=FILE_FIELDS,
+                                  selected_fields=self.file_fields,
                                   limit=limit + 1).to_arrow()
         lst = rows.to_pylist()
         lst.sort(key=lambda r: r["byte_start"])
@@ -498,20 +530,20 @@ class Manifest:
         for kind, path in selections:
             if kind == "tar":
                 for b in tbl.scan(row_filter=In("tar_key", self._tar_keys(path)),
-                                  selected_fields=FILE_FIELDS).to_arrow_batch_reader():
+                                  selected_fields=self.file_fields).to_arrow_batch_reader():
                     yield kind, path, b
                 continue
             if kind == "member":
                 tk, sk = path
                 arr = tbl.scan(row_filter=And(In("tar_key", self._tar_keys(tk)),
                                               EqualTo("source_key", sk)),
-                               selected_fields=FILE_FIELDS).to_arrow()
+                               selected_fields=self.file_fields).to_arrow()
                 for b in arr.slice(0, 1).to_batches():
                     yield kind, path, b
                 continue
             if kind == "file":
                 arr = tbl.scan(row_filter=cut(EqualTo("source_key", path)),
-                               selected_fields=FILE_FIELDS).to_arrow()
+                               selected_fields=self.file_fields).to_arrow()
                 for b in newest_per_key(arr).to_batches():
                     yield kind, path, b
                 continue
@@ -522,7 +554,7 @@ class Manifest:
                     yield kind, path, b
                 continue
             flt = cut(StartsWith("source_key", path + "/") if path else None)
-            kw = {"selected_fields": FILE_FIELDS}
+            kw = {"selected_fields": self.file_fields}
             if flt is not None:
                 kw["row_filter"] = flt
             for b in tbl.scan(**kw).to_arrow_batch_reader():
@@ -546,7 +578,7 @@ class Manifest:
         dirs = self.folders_under(path)
         for i in range(0, len(dirs), self.DIR_CHUNK):
             arr = tbl.scan(row_filter=cut(In("parent_dir", dirs[i:i + self.DIR_CHUNK])),
-                           selected_fields=FILE_FIELDS).to_arrow()
+                           selected_fields=self.file_fields).to_arrow()
             for b in newest_per_key(arr).to_batches(max_chunksize=20_000):
                 yield b
 
@@ -645,7 +677,8 @@ class Provisioner:
 
     def create_bucket(self, name):
         """Private by default: all four Block Public Access settings on, bucket
-        owner enforced (no ACLs), SSE-S3 default encryption."""
+        owner enforced (no ACLs), SSE-S3 default encryption, TLS-only bucket
+        policy, and a lifecycle rule that aborts incomplete multipart uploads."""
         c = self.session.client("s3", region_name=self.region)
         kw = {"Bucket": name, "ObjectOwnership": "BucketOwnerEnforced"}
         if self.region != "us-east-1":
@@ -657,42 +690,121 @@ class Provisioner:
         c.put_bucket_encryption(Bucket=name, ServerSideEncryptionConfiguration={
             "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
                        "BucketKeyEnabled": True}]})
+        # TLS only: deny any request made over plain HTTP (a Deny with a
+        # condition -- grants nothing to anyone)
+        c.put_bucket_policy(Bucket=name, Policy=json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{"Sid": "DenyInsecureTransport", "Effect": "Deny", "Principal": "*",
+                           "Action": "s3:*",
+                           "Resource": [f"arn:aws:s3:::{name}", f"arn:aws:s3:::{name}/*"],
+                           "Condition": {"Bool": {"aws:SecureTransport": "false"}}}]}))
+        # parts of an interrupted multipart upload are billed until aborted
+        c.put_bucket_lifecycle_configuration(Bucket=name, LifecycleConfiguration={
+            "Rules": [{"ID": "abort-incomplete-multipart-uploads", "Status": "Enabled",
+                       "Filter": {"Prefix": ""},
+                       "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}}]})
 
-    def create_tables(self, table_bucket_arn, namespace, table_name, archiver_path=ARCHIVER_PATH):
-        """Namespace + manifest, dir-index and run-history tables, with exactly
-        the schemas the archiver uses. Existing ones are left alone.
-        Returns [(table, 'created' | 'exists')]."""
+    def _catalog(self, table_bucket_arn):
         from pyiceberg.catalog import load_catalog
-        from pyiceberg.exceptions import NamespaceAlreadyExistsError, TableAlreadyExistsError
-        from pyiceberg.partitioning import PartitionSpec, PartitionField
-        from pyiceberg.transforms import DayTransform
-        a = archiver_module(archiver_path)
         cfg = Config(region=self.region, table_bucket_arn=table_bucket_arn)
         if self.session.profile_name and self.session.profile_name != "default":
             os.environ["AWS_PROFILE"] = self.session.profile_name
-        cat = load_catalog("s3tables", **cfg.catalog_props())
+        return load_catalog("s3tables", **cfg.catalog_props())
+
+    def create_tables(self, table_bucket_arn, namespace, table_name, tar_bucket=None,
+                      archiver_path=ARCHIVER_PATH):
+        """Namespace + manifest, dir-index and run-history tables, with exactly
+        the schemas the archiver uses. Existing ones are left alone; an existing
+        manifest without a recorded tar bucket gets one.
+        Returns [(table, 'created' | 'exists')]."""
+        from pyiceberg.exceptions import NamespaceAlreadyExistsError, TableAlreadyExistsError
+        from pyiceberg.partitioning import PartitionSpec, PartitionField
+        from pyiceberg.transforms import DayTransform
+        a = archiver_core_module(archiver_path)
+        cat = self._catalog(table_bucket_arn)
         try:
             cat.create_namespace(namespace)
         except NamespaceAlreadyExistsError:
             pass
         out = []
+        props = a.table_properties(tar_bucket) if hasattr(a, "table_properties") else {}
         specs = [
             (table_name, a.ICEBERG_SCHEMA,
              PartitionSpec(PartitionField(source_id=7, field_id=1000,
-                                          transform=DayTransform(), name="archive_ts_day"))),
-            (table_name + "_dirs", a.DIRS_ICEBERG_SCHEMA, None),
-            (table_name + "_runs", a.RUNS_ICEBERG_SCHEMA, None),
+                                          transform=DayTransform(), name="archive_ts_day")), props),
+            (table_name + "_dirs", a.DIRS_ICEBERG_SCHEMA, None, {}),
+            (table_name + "_runs", a.RUNS_ICEBERG_SCHEMA, None, {}),
         ]
-        for name, schema, spec in specs:
+        for name, schema, spec, p in specs:
             try:
                 kw = {"identifier": f"{namespace}.{name}", "schema": schema}
                 if spec is not None:
                     kw["partition_spec"] = spec
+                if p:
+                    kw["properties"] = p
                 cat.create_table(**kw)
                 out.append((name, "created"))
             except TableAlreadyExistsError:
                 out.append((name, "exists"))
+                if p and tar_bucket:
+                    self.record_tar_bucket(table_bucket_arn, namespace, name, tar_bucket, cat=cat)
         return out
+
+    # -- connect an existing archive ------------------------------------------
+    def list_manifests(self, table_bucket_arn):
+        """Archive manifests in a table bucket: tables that have the manifest
+        columns (other tables are ignored). Returns [{namespace, table,
+        tar_bucket (recorded or None), dirs, runs}], sorted."""
+        cat = self._catalog(table_bucket_arn)
+        need = {"tar_key", "source_key", "byte_start", "byte_end"}
+        out = []
+        for ns in cat.list_namespaces():
+            ns_name = ".".join(ns)
+            names = {t[-1] for t in cat.list_tables(ns_name)}
+            for t in sorted(names):
+                if t.endswith("_dirs") or t.endswith("_runs"):
+                    continue
+                try:
+                    tbl = cat.load_table(f"{ns_name}.{t}")
+                except Exception:
+                    continue
+                if not need <= set(tbl.schema().column_names):
+                    continue
+                out.append({"namespace": ns_name, "table": t,
+                            "tar_bucket": tbl.properties.get("sfa.tar_bucket"),
+                            "dirs": f"{t}_dirs" in names, "runs": f"{t}_runs" in names})
+        return out
+
+    def verify_tar_bucket(self, table_bucket_arn, namespace, table, bucket):
+        """Check that this bucket holds the archive's tars: take one tar_key from
+        the manifest and HEAD it in the bucket. Returns a short message; raises
+        ValueError if the tar is not there."""
+        cat = self._catalog(table_bucket_arn)
+        tbl = cat.load_table(f"{namespace}.{table}")
+        rows = tbl.scan(selected_fields=("tar_key",), limit=1).to_arrow()
+        if rows.num_rows == 0:
+            return "the archive is empty: nothing to check yet"
+        key = rows.column("tar_key")[0].as_py().lstrip("/")
+        try:
+            self.session.client("s3", region_name=self.region).head_object(Bucket=bucket, Key=key)
+        except Exception as e:
+            code = getattr(e, "response", {}).get("Error", {}).get("Code", type(e).__name__)
+            raise ValueError(f"a tar listed in the manifest is not in s3://{bucket} ({code}). "
+                             f"Pick the bucket this archive's tars were written to.") from None
+        return f"found {posixpath.basename(key)} from the manifest in this bucket"
+
+    def record_tar_bucket(self, table_bucket_arn, namespace, table, bucket, cat=None):
+        """Record the tar bucket in the manifest table's properties (best effort)."""
+        try:
+            cat = cat or self._catalog(table_bucket_arn)
+            tbl = cat.load_table(f"{namespace}.{table}")
+            if tbl.properties.get("sfa.tar_bucket"):
+                return False
+            with tbl.transaction() as tx:
+                tx.set_properties(**{"sfa.tar_bucket": bucket})
+            return True
+        except Exception:
+            return False
 
 
 # --------------------------------------------------------------------------- #
@@ -731,6 +843,39 @@ class TarStore:
 # --------------------------------------------------------------------------- #
 # Restore engine
 # --------------------------------------------------------------------------- #
+class _Verifier:
+    """Checks restored bytes against the manifest: CRC64NVME when the row has
+    it (S3's encoding, comparable with S3 Batch Operations checksum reports),
+    otherwise MD5. Feed it chunks with update(); check() raises on mismatch."""
+
+    def __init__(self, row, enabled=True):
+        self.row = row
+        self.algo = (row.get("checksum_algorithm") or "").upper() if enabled else ""
+        self.want = row.get("checksum") if self.algo == "CRC64NVME" else None
+        self._crc = 0
+        if self.want:
+            from awscrt import checksums as _crt
+            self._fn = _crt.crc64nvme
+            self._md5 = None
+        else:
+            self._fn = None
+            self._md5 = hashlib.md5(usedforsecurity=False) if (enabled and row.get("md5")) else None
+
+    def update(self, chunk):
+        if self._fn is not None:
+            self._crc = self._fn(chunk, self._crc)
+        elif self._md5 is not None:
+            self._md5.update(chunk)
+
+    def check(self):
+        if self.want:
+            got = base64.b64encode(self._crc.to_bytes(8, "big")).decode("ascii")
+            if got != self.want:
+                raise ValueError(f"CRC64NVME mismatch (manifest {self.want}, got {got})")
+        elif self._md5 is not None and self._md5.hexdigest() != self.row["md5"]:
+            raise ValueError(f"md5 mismatch (manifest {self.row['md5']}, got {self._md5.hexdigest()})")
+
+
 @dataclass
 class RestoreStats:
     files_total: int = 0          # rows seen so far (grows while streaming)
@@ -755,6 +900,8 @@ class RestoreEngine:
 
     MERGE_GAP = 1 << 20          # 1 MiB of unwanted bytes is cheaper than a GET
     MAX_SPAN = 64 << 20          # cap one GET's memory footprint
+    STREAM_MIN = 64 << 20        # members at least this big stream to disk
+    HEADER_SLACK = 1 << 20       # tar header blocks allowed on top of the file size
     GROUP_ROWS = 20_000          # rows buffered before dispatching GETs
 
     def __init__(self, cfg: Config, dest_dir, overwrite=False, verify_md5=True,
@@ -768,6 +915,12 @@ class RestoreEngine:
         self.cancel = threading.Event()
         self._lock = threading.Lock()
         self._on_error = on_error
+        # the chosen destination itself may be (or sit under) a symlink, e.g.
+        # /tmp on macOS; only what gets created *below* it is checked
+        os.makedirs(self.dest, exist_ok=True)
+        self._dest_real = os.path.realpath(self.dest)
+        old = os.umask(0); os.umask(old)
+        self._file_mode = 0o666 & ~old           # what a plain open() would give
         session = boto3.Session(profile_name=cfg.profile or None)
         from botocore.config import Config as BotoConfig
         self._s3 = session.client("s3", region_name=cfg.region or None,
@@ -816,7 +969,9 @@ class RestoreEngine:
             cur, cs, ce = [], None, None
             for row, rel in lst:
                 s, e = row["byte_start"], row["byte_end"]
-                if cur and (s - ce - 1 <= self.MERGE_GAP) and (max(ce, e) - cs + 1 <= self.MAX_SPAN):
+                big = e - s + 1 >= self.STREAM_MIN
+                if cur and not big and (s - ce - 1 <= self.MERGE_GAP) and \
+                        (max(ce, e) - cs + 1 <= self.MAX_SPAN):
                     cur.append((row, rel))
                     ce = max(ce, e)
                 else:
@@ -827,10 +982,110 @@ class RestoreEngine:
                 spans.append((tar_key, cs, ce, cur))
         return spans
 
+    # -- safe writing ----------------------------------------------------------
+    def _check_range(self, row):
+        """A member's byte range is its header plus the data padded to 512 B;
+        anything far larger means a damaged or tampered manifest row -- refuse it
+        rather than downloading (and buffering) an arbitrary range."""
+        n = row["byte_end"] - row["byte_start"] + 1
+        if n <= 0 or n > row["filesize"] + self.HEADER_SLACK:
+            raise ValueError(f"byte range {row['byte_start']}-{row['byte_end']} does not fit a "
+                             f"{row['filesize']}-byte file; manifest row looks wrong")
+
+    def _open_dest(self, rel):
+        """Create the temp file for `rel` so that nothing can redirect the write
+        outside the destination: the parent must really resolve inside it (a
+        symlinked folder planted there is refused) and the temp file is created
+        fresh (O_EXCL, O_NOFOLLOW, random name). Returns (dest, tmp, file)."""
+        dest = self._dest_path(rel)
+        parent = os.path.dirname(dest)
+        self._make_dirs(parent)
+        tmp = os.path.join(parent, f".{os.path.basename(dest)}.restoring-{uuid.uuid4().hex[:8]}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        return dest, tmp, os.fdopen(fd, "wb")
+
+    def _make_dirs(self, parent):
+        """Create `parent` below the destination one component at a time and
+        refuse any component that is a symlink (or not a directory). os.makedirs
+        would follow a symlinked folder planted in the destination and create
+        directories outside it before any check could run."""
+        rel = os.path.relpath(parent, self.dest)
+        if rel == ".":
+            return
+        cur = self.dest
+        for part in rel.split(os.sep):
+            cur = os.path.join(cur, part)
+            try:
+                st = os.lstat(cur)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(cur)
+                except FileExistsError:      # another restore thread made it
+                    pass
+                st = os.lstat(cur)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                raise ValueError(f"destination folder {cur} is a symlink or not a folder; "
+                                 f"refusing to write through it")
+
+    def _finish(self, dest, tmp, mtime, nbytes):
+        os.chmod(tmp, self._file_mode)
+        os.replace(tmp, dest)          # replaces a symlink at dest, never follows it
+        try:
+            os.utime(dest, (mtime, mtime), follow_symlinks=False)   # original mtime
+        except (OSError, NotImplementedError):
+            pass
+        with self._lock:
+            self.stats.files_done += 1
+            self.stats.bytes_done += nbytes
+
+    def _stream_member(self, tar_key, row, rel):
+        """One large member: stream the ranged GET through tarfile's streaming
+        mode straight to disk, hashing as it goes -- memory stays bounded."""
+        resp = self._s3.get_object(Bucket=self.cfg.bucket, Key=tar_key.lstrip("/"),
+                                   Range=f"bytes={row['byte_start']}-{row['byte_end']}")
+        with self._lock:
+            self.stats.requests += 1
+            self.stats.bytes_fetched += row["byte_end"] - row["byte_start"] + 1
+        ver = _Verifier(row, self.verify_md5)
+        dest, tmp, out = self._open_dest(rel)
+        try:
+            with out, tarfile.open(fileobj=resp["Body"], mode="r|") as tf:
+                m = tf.next()
+                if m is None or not m.isfile():
+                    raise ValueError("no regular-file tar member at recorded offset")
+                src = tf.extractfile(m)
+                n = 0
+                while True:
+                    buf = src.read(8 << 20)
+                    if not buf:
+                        break
+                    ver.update(buf); out.write(buf); n += len(buf)
+            ver.check()
+            self._finish(dest, tmp, m.mtime, n)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
     # -- execution -----------------------------------------------------------
     def _fetch_span(self, span):
         tar_key, cs, ce, members = span
         if self.cancel.is_set():
+            return
+        try:
+            for row, _ in members:
+                self._check_range(row)
+        except ValueError as e:
+            self._err(f"{members[0][0]['source_key']}: {e}", n=len(members))
+            return
+        if len(members) == 1 and ce - cs + 1 >= self.STREAM_MIN:
+            row, rel = members[0]
+            try:
+                self._stream_member(tar_key, row, rel)
+            except Exception as e:
+                self._err(f"{row['source_key']}: {type(e).__name__}: {e}")
             return
         try:
             resp = self._s3.get_object(Bucket=self.cfg.bucket, Key=tar_key.lstrip("/"),
@@ -854,26 +1109,23 @@ class RestoreEngine:
                 piece = chunk[off: off + (row["byte_end"] - row["byte_start"] + 1)]
                 with tarfile.open(fileobj=io.BytesIO(piece), mode="r:") as tf:
                     m = tf.next()
-                    if m is None:
-                        raise ValueError("no tar member at recorded offset")
+                    if m is None or not m.isfile():
+                        raise ValueError("no regular-file tar member at recorded offset")
                     data = tf.extractfile(m).read()
-                if self.verify_md5 and row.get("md5"):
-                    got = hashlib.md5(data).hexdigest()
-                    if got != row["md5"]:
-                        raise ValueError(f"md5 mismatch (manifest {row['md5']}, got {got})")
-                dest = self._dest_path(rel)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                tmp = dest + ".restoring"
-                with open(tmp, "wb") as f:
-                    f.write(data)
-                os.replace(tmp, dest)
+                ver = _Verifier(row, self.verify_md5)
+                ver.update(data)
+                ver.check()
+                dest, tmp, out = self._open_dest(rel)
                 try:
-                    os.utime(dest, (m.mtime, m.mtime))   # original mtime from tar header
-                except OSError:
-                    pass
-                with self._lock:
-                    self.stats.files_done += 1
-                    self.stats.bytes_done += len(data)
+                    with out:
+                        out.write(data)
+                    self._finish(dest, tmp, m.mtime, len(data))
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
             except Exception as e:
                 self._err(f"{row['source_key']}: {type(e).__name__}: {e}")
 

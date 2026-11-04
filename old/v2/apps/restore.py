@@ -5,6 +5,22 @@ import random
 import string
 import argparse
 
+
+def safe_extractall(tarf, path="."):
+    """extractall without tar path traversal: the 'data' filter where Python has
+    it (3.12+, and recent 3.8-3.11 patch releases); otherwise refuse absolute
+    paths, '..', links and device files before extracting."""
+    if hasattr(tarfile, "data_filter"):
+        tarf.extractall(path=path, filter="data")
+        return
+    import os
+    root = os.path.realpath(path)
+    for m in tarf.getmembers():
+        target = os.path.realpath(os.path.join(root, m.name))
+        if not (target == root or target.startswith(root + os.sep)) or not (m.isfile() or m.isdir()):
+            raise ValueError(f"unsafe tar member refused: {m.name!r}")
+    tarf.extractall(path=path)
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--bucket_name', help='s3 bucket name', action='store', required=True)
 parser.add_argument('--key_name', help='tarfile in S3', action='store', required=True)
@@ -34,7 +50,7 @@ temp_tarfile = 'temp_tarfile-%s.tar' % rand_char
 
 try:
     names = tarf.getnames()
-    tarf.extractall(path=extract_path)
+    safe_extractall(tarf, path=extract_path)
     print(names)
 except Exception as e:
     print(e)

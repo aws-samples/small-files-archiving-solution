@@ -7,41 +7,42 @@ An archiving solution that **bundles** large numbers of small filesystem files i
 Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution), this version moves the manifest from CSV objects to S3 Tables and reworks the internals with single-pass MD5, streaming tar, batched commits, and multiprocess parallelism.
 
 <p align="center">
-  <a href="v3/gui/docs/demo.mp4"><img src="v3/gui/docs/demo-preview.gif" width="860" alt="Demo: setup wizard, archiving 523,124 files, browsing, restore and an incremental run"></a><br>
-  <b>▶ Click the preview for the full 2-minute demo video (MP4)</b>
+  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="1-minute intro: why small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
+  <b>▶ Click the preview for the 1-minute intro video (MP4, recorded on AWS)</b>
 </p>
 
 ## Desktop GUI — start here
 
-The easiest way to use the solution is the desktop app in [`v3/gui`](v3/gui/README.md). **See the [GUI user guide](v3/gui/README.md)** for every screen, step by step.
+The easiest way to use the solution is the desktop app in [`gui`](gui/README.md). **See the [GUI user guide](gui/README.md)** for every screen, step by step.
 
-![Main window: local disk on the left, the archive's original files on the right, jobs at the bottom](v3/gui/docs/images/21-browse-files.png)
+![Main window: local disk on the left, the archive's original files on the right, jobs at the bottom](gui/docs/images/21-browse-files.png)
 
-▶ **[2-minute demo video](v3/gui/docs/demo.mp4)**: setup, archiving 523,124 files, browsing, restore and an incremental run.
+▶ **[1-minute intro](gui/docs/demo.mp4)**: why millions of small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore. **[2-minute walkthrough](gui/docs/demo-walkthrough.mp4)**: archiving 523,124 files from a local disk, browsing, restore and an incremental run.
 
 ```bash
-cd v3/gui && ./run-gui.sh      # first run creates its own Python environment
+cd gui && ./run-gui.sh      # first run creates its own Python environment
 ```
 
-1. **Set up:** a first-run wizard picks or creates the S3 Tables table bucket, the manifest tables and a private tar bucket, all by name, with no ARNs to look up. → [guide §2](v3/gui/README.md#2-first-run-setup-wizard)
-2. **Archive:** select folders on the left and click **Archive →**. Each tar in flight gets its own bundling or uploading bar. → [§4](v3/gui/README.md#4-archive-files)
-3. **Browse:** the right pane shows your **original files and folders**, with the tar and byte range of each file. Switch to **Tar objects** to see the tars themselves. → [§5](v3/gui/README.md#5-browse-the-archive)
-4. **Restore:** select files or folders on the right and click **← Restore**. Only the needed byte ranges are fetched, and MD5 is verified. → [§6](v3/gui/README.md#6-restore-files)
+1. **Set up:** a first-run wizard picks or creates the S3 Tables table bucket, the manifest tables and a private tar bucket, all by name, with no ARNs to look up. → [guide §2](gui/README.md#2-first-run-setup-wizard)
+2. **Archive:** select folders on the left and click **Archive →**. Each tar in flight gets its own bundling or uploading bar. → [§4](gui/README.md#4-archive-files)
+3. **Browse:** the right pane shows your **original files and folders**, with the tar and byte range of each file. Switch to **Tar objects** to see the tars themselves. → [§5](gui/README.md#5-browse-the-archive)
+4. **Restore:** select files or folders on the right and click **← Restore**. Only the needed byte ranges are fetched, and MD5 is verified. → [§6](gui/README.md#6-restore-files)
 
-Also in the GUI: [incremental runs](v3/gui/README.md#7-incremental-archiving), [file-list reports as input](v3/gui/README.md#8-archive-from-a-file-list-report) and [one-click retry of failed files](v3/gui/README.md#9-failed-files-and-retry).
+Also in the GUI: [incremental runs](gui/README.md#7-incremental-archiving), [file-list reports as input](gui/README.md#8-archive-from-a-file-list-report) and [one-click retry of failed files](gui/README.md#9-failed-files-and-retry).
 
 | Setup wizard | Archiving in progress |
 |---|---|
-| ![Wizard](v3/gui/docs/images/06-wizard-applied.png) | ![Progress](v3/gui/docs/images/12-archiving-progress.png) |
+| ![Wizard](gui/docs/images/06-wizard-applied.png) | ![Progress](gui/docs/images/12-archiving-progress.png) |
 
 The rest of this document covers the command-line archiver and restore scripts that the GUI runs underneath.
 
 ### Key features
 
 - **Desktop GUI** — setup wizard, dual-pane browse (original files ↔ tar objects), archive/restore with per-tar progress, incremental runs, report input and retry of failed files. See above.
+- **S3 bucket as a source** — archive the objects of a bucket/prefix, an S3 Inventory or an s3tar manifest with 256-way concurrent GETs, verifying each object against the checksum S3 stored for it. See §3.
 - **File bundling** — packs many small files into large tar objects, cutting PUT requests and sidestepping the small-object storage penalty (e.g. Glacier IR 128 KB minimum billing).
 - **S3 Tables manifest** — records every file's `tar_key` + byte range in a managed Apache Iceberg table, so an individual file stays locatable inside a tar.
-- **Direct individual-file restore** — extracts a single file straight from its tar via byte-range GET, without downloading the whole tar (`v3/fss3-restore.py`).
+- **Direct individual-file restore** — extracts a single file straight from its tar via byte-range GET, without downloading the whole tar (`fss3-restore.py`).
 - **Two input modes** — walk a directory (`--src-path`), or archive an explicit `--input-file` list of files (from a DB export, `find`, or a change-list).
 - **Per-file MD5 integrity** — every file is hashed (single-pass, `--md5`) and the digest is stored in the manifest, so restores can be verified byte-for-byte. Integrity checking is essential for an archive, so always enable it.
 - **Multiprocess parallelism** — tar packing and upload run across worker processes, bypassing the GIL; manifest commits are batched to avoid Iceberg small-file/snapshot explosion.
@@ -78,7 +79,7 @@ File source (directory walk of --src-path, or an explicit --input-file list)
                                                   (default 50,000 rows)
 ```
 
-Script: `v3/fss3-archiver-s3tables-mp.py` (multiprocess). CPU-bound work such as tar packing and MD5 runs in parallel across worker processes, bypassing the GIL; the scan runs on threads because it is latency-bound rather than CPU-bound.
+Script: `fss3-archiver-s3tables-mp.py` (multiprocess). CPU-bound work such as tar packing and MD5 runs in parallel across worker processes, bypassing the GIL; the scan runs on threads because it is latency-bound rather than CPU-bound.
 
 Design points:
 
@@ -102,7 +103,7 @@ Design points:
 - A pre-created S3 bucket (for tars) and an S3 Tables table bucket (for the manifest). The namespace and table are created automatically (idempotent) by the script.
 
 ```bash
-pip install "pyiceberg[pyarrow,pyiceberg-core]" boto3
+pip install -r archiver/requirements.txt   # boto3[crt]: fast CRC64NVME
 # Test-verified: pyiceberg 0.11.1 / pyarrow 18.1.0 / boto3 1.39.17
 # pyiceberg >= 0.12 needs the pyiceberg-core extra to append to the day-partitioned table (also verified: 0.12.0 / pyarrow 26.0.0 / boto3 1.43)
 ```
@@ -117,18 +118,21 @@ s3tables:PutTableData, GetTableData
 + s3:PutObject on the tar destination bucket
 ```
 
+> Least-privilege example IAM policies (archiver, browse/restore, setup wizard): see the [GUI guide, IAM permissions](gui/README.md#iam-permissions).
+
+
 ---
 
 ## 3. Usage
 
 Every run combines a **file source** (walk `--src-path`, or an explicit `--input-file` list) with a **batching rule** (`--max-size` or `--max-files`). The scenarios below all share the same destination/S3 Tables flags — only the source and batching choices change.
 
-> 💡 [`v3/run.sh`](v3/run.sh) packages every scenario below (plus restore) as ready-to-run bash functions — edit the shared vars at the top, uncomment one call, and run `bash run.sh`.
+> 💡 [`archiver/run.sh`](archiver/run.sh) packages every scenario below (plus restore) as ready-to-run bash functions — edit the shared vars at the top, uncomment one call, and run `bash run.sh`.
 
 **Baseline — bundle a directory into uniform-size tars (the common case):**
 
 ```bash
-python v3/fss3-archiver-s3tables-mp.py \
+python archiver/fss3-archiver-s3tables-mp.py \
   --src-path         /data/nfsshare \
   --dst-bucket       your-own-dest-bucket \
   --dst-prefix       20260804 \
@@ -157,7 +161,7 @@ The remaining scenarios are the baseline **with the noted flags changed**:
   --input-file files-to-archive.txt --max-files 1000
 ```
 
-One absolute path per line (blank lines and `#` comments skipped). Missing or unreadable paths are counted as failed and go to the failed-file list; symlinks and non-regular files are skipped. Neither stops the run. CSV/TSV reports work too — see `--input-format` / `--path-column`. `--src-path` is still required — it's the base for each tar member's relative path (stored relative to `--src-path` when the file lies under it, else the full path with the leading `/` dropped).
+One absolute path per line (blank lines and `#` comments skipped). Missing or unreadable paths are counted as failed and go to the failed-file list; symlinks and non-regular files are skipped. Neither stops the run. CSV/TSV reports work too — see `--input-format` / `--path-column`. `--src-path` is still required — it's the base for each tar member's relative path. Paths must resolve inside `--src-path` (symlinked parent folders and `..` are resolved first); anything outside is refused and listed as failed, unless you pass `--allow-outside-src` (then it is stored as the full path with the leading `/` dropped). For lists made with `find -print0`, use `--input-format nul`, which is safe for any file name.
 
 **Cold, write-once data — compress:**
 
@@ -168,6 +172,79 @@ One absolute path per line (blank lines and `#` comments skipped). Missing or un
 ⚠️ `--compress` disables byte-range individual restore (offsets recorded as `-1`), and `DEEP_ARCHIVE` requires a whole-tar restore before any read — pair them only for archives you don't expect to read back file-by-file. See [Limitations](#limitations-and-notes).
 
 Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-individual-file-via-byte-range-get) (LOOKUP by path, or DIRECT by known offsets).
+
+### Archive from an S3 bucket (`s3s3-archiver-s3tables-mp.py`)
+
+The same pipeline, manifest, browser, restore, incremental, Resume and failed-file list work with an **S3 bucket as the source**. Use it for buckets full of small objects that are expensive to store or to move to colder classes one object at a time.
+
+> ⚠️ **Run it in the source bucket's Region, not on your laptop.** Every byte the archiver reads from S3 into a computer outside AWS is billed as **S3 data transfer out**. That's about $0.126/GB in Seoul for the first 10 TB a month: roughly **$129 per TB**, or about **$1.3 million for 10 PB**. On EC2 (or CloudShell) in the same Region the reads cost nothing beyond the GET requests, and they're several times faster. Use a public subnet or an S3 Gateway VPC endpoint: a NAT Gateway bills about $0.059/GB. The GUI repeats this warning when **Run on** is *This computer*. See [Running on EC2: two ways](#running-on-ec2-two-ways).
+
+```bash
+python archiver/s3s3-archiver-s3tables-mp.py \
+  --src-s3           s3://source-bucket/data/fs1/ \
+  --src-prefix       data/ \
+  --dst-bucket       your-own-dest-bucket \
+  --dst-prefix       s3-archive \
+  --max-size         256MB \
+  --num-workers      8 \
+  --get-concurrency  256 \
+  --region           ap-northeast-2 \
+  --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket>
+```
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--src-s3 s3://bucket/prefix` | archive every object below the prefix: a parallel `ListObjectsV2` walk, split on `/` | — |
+| `--src-manifest FILE` | archive the objects listed in an **s3tar CSV** (`bucket,key,size[,etag]`), an **S3 Inventory** `manifest.json` (CSV or Parquet), or one `s3://bucket/key` per line (the failed-file list); local path or `s3://` | — |
+| `--src-prefix` | store keys relative to this prefix: the listed prefix (default), a parent (`data/` keeps `fs1/…`), or `""` for the full key | listed prefix |
+| `--get-concurrency` | concurrent source GETs in total, spread over `--num-workers` processes | 256 |
+| `--get-client` | client for source GETs of objects under 32 MiB: `crt` (the AWS CRT S3 client, native code) or `boto3`. Larger objects always stream through boto3 | `crt` |
+| `--list-threads` | parallel listing / HeadObject threads | 16 |
+| `--verify-source-checksum` | compare each object's bytes with the full-object checksum S3 stored for it (CRC64NVME, CRC32C, CRC32, SHA256 or SHA1); a mismatch fails that object | on |
+| `--src-region` | Region of the source bucket | `--region` |
+
+All destination, bundling, upload, manifest, `--incremental` (by LastModified), `--resume-run` and `--part-size` options are the same as for the local archiver.
+
+**Where the time goes.** Small objects make the job **GET-bound**: one request per object at about 10–20 ms each inside the Region. That's why each worker fetches its batch with many concurrent GETs and writes the tar in order. S3 serves about 5,500 GETs/s per prefix partition, and retries with backoff and jitter absorb `503 SlowDown` responses.
+
+With boto3, profiling showed the **CPU, not the network**, as the limit: about 60% of it went to botocore's per-request work (an adaptive-retry rate limiter, `Last-Modified` parsing, HTTP and TLS in Python), while checksum validation took about 5%. The default `--get-client crt` sends each small-object GET through the AWS CRT S3 client, which signs, sends and receives in native code. It is still one plain GET per object, so S3 returns the same full-object checksum header and the CRC64NVME comparison is unchanged.
+
+Measured on EC2 in `ap-northeast-2` (Amazon Linux 2023, through SSM), 523,124 objects (9.95 GiB), exactly one GET per object, every checksum verified, 0 failures:
+
+| Instance | Client | Workers / GETs | Throughput |
+|---|---|---|---|
+| m5.2xlarge (8 vCPU) | boto3 (before) | 8 / 256 | 35.5 MB/s |
+| m5.2xlarge | crt | 8 / 256 | 77.8 MB/s |
+| m5.2xlarge | crt | 16 / 512 | 92.0 MB/s |
+| c6in.8xlarge (32 vCPU) | crt | 32 / 1024 | 167.5 MB/s |
+| c6in.8xlarge | crt | 48 / 1536 | **180.8 MB/s** |
+
+Throughput grows with vCPUs. A good starting point is vCPU + 16 workers (at most 2 per vCPU) and 32 GETs per worker; the GUI fills these in when you pick an instance. The fs1 runs were only about a minute long on the c6in, so startup and listing ramp-up are part of these averages.
+
+**Checksums.** CRC64NVME is computed while each object streams into its tar and stored in S3's own encoding, so it can be compared directly with the source object's `x-amz-checksum-crc64nvme` or an **S3 Batch Operations "compute checksum"** report. S3 adds a full-object CRC64NVME to new uploads by default. In the test, all 523,124 objects carried one, and a 2,000-object sample matched exactly. Objects that carry only a *composite* (multipart) checksum can't be compared byte-for-byte and are archived without that comparison.
+
+#### Running on EC2: two ways
+
+Both start from the GUI's **Archive from S3** dialog and run exactly the archiver version the GUI is using: it is uploaded to `s3://<tar bucket>/_sfa/runner/<version>/`, and the instance installs it once into a private Python 3.12 environment (prebuilt wheels only).
+
+| | **A. Run on EC2 via SSM** (recommended) | **B. Copy the script and run it yourself** |
+|---|---|---|
+| How | Set **Run on** to the instance, then **Start archiving** | Click **Copy script for EC2**, then paste it into a terminal on the instance (SSH, Session Manager or EC2 Instance Connect) |
+| Needs | The instance is Online in Systems Manager; your GUI user may `ssm:SendCommand` to it | Only a shell on the instance |
+| Progress | Live bars, rate, ETA and log in the GUI; it reattaches after you close and reopen the GUI | `tail -f` the log file the script prints |
+| Cancel / Resume | Buttons in the GUI | `kill -INT <pid>` (a clean cancel); paste the script again with `RESUME_OF=<run id>` |
+| Good for | Day-to-day runs | No SSM access, scheduled runs, CloudShell, or several instances that each archive their own part of the source |
+
+- **Instance role:** the archiver permissions (see the [GUI guide, IAM](gui/README.md#iam-permissions)) plus `s3:GetObject` on `_sfa/runner/*` in the tar bucket. For A, also `s3:PutObject` on `_sfa/jobs/*` (progress) and `AmazonSSMManagedInstanceCore`.
+- **Size:** about vCPU + 16 workers (at most 2 per vCPU) and 32 GETs per worker; the dialog fills these in for the instance you pick (see the table above).
+- **Network:** a public subnet or an S3 Gateway VPC endpoint, never a NAT Gateway.
+- **Without the GUI:** on the instance, `pip install -r archiver/requirements.txt` and run the command shown at the top of this section.
+
+Step-by-step for both: [GUI guide, Run on EC2](gui/README.md#run-on-ec2-no-data-transfer-out).
+
+Objects in GLACIER or DEEP_ARCHIVE are reported as failed with "restore it in S3 first". Folder markers are skipped. Keys that can't be used as a relative path, such as `../x`, are refused. The source is never modified or deleted.
+
+Extra IAM for the source: `s3:ListBucket` on the source bucket (with an `s3:prefix` condition), `s3:GetObject` on `arn:aws:s3:::<source-bucket>/<prefix>*`, and `s3:GetObject` on the inventory bucket if you use `--src-manifest` with S3 Inventory.
 
 ### Key parameters
 
@@ -192,11 +269,15 @@ Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-i
 | `--progress` | print JSON progress snapshots to stdout (lines prefixed `@@PROGRESS `); used by the GUI | off |
 | `--incremental` | archive only files whose mtime **or** ctime is newer than the start of the last successful (`ok`/`partial`) run of the **same source** (same `--src-path` + `--walk-path` set), read from `<table-name>_runs`. ctime catches renames/moves. The first run of a source archives everything. Not combinable with `--input-file` | off |
 | `--watermark-skew` | seconds subtracted from the incremental watermark for clock differences between hosts / the file server; files in the overlap are re-archived, never missed | 300 |
-| `--input-format` | `--input-file` format: `lines` (one path per line), `csv`, `tsv` (a file-list report); `auto` picks by extension; `.gz` is read transparently | auto |
+| `--input-format` | `--input-file` format: `lines` (one path per line), `nul` (NUL-separated, from `find -print0`), `csv`, `tsv` (a file-list report); `auto` picks by extension; `.gz` is read transparently | auto |
+| `--resume-run` | continue an interrupted (cancelled or failed) run: the same source is archived again, skipping every file that run already archived, so nothing is missing or duplicated. Repeat it for a chain of resumes. Keeps a set of the run's file names in memory (~100 B per file). GUI: **Resume** | — |
+| `--allow-outside-src` | accept `--input-file` paths that resolve outside `--src-path` (off by default, so a list can't pull in files from elsewhere on the host) | off |
 | `--path-column` | csv/tsv report column with the path: header name (e.g. `path`) or 0-based index. Relative paths resolve against `--src-path` | 0 |
 | `--run-history` / `--no-run-history` | record every run (status, counts, watermark, failed-list location) in `<table-name>_runs`; required by `--incremental` | on |
 | `--tar-storageclass` | storage class for tar objects (see below) | STANDARD |
 | `--part-size` | multipart upload part size, also the single-PUT threshold: `8MB`, `16MB`, `32MB`, `64MB`. Every part is a billed request; see §5.3 | 32MB |
+| `--upload-client` | client for tar uploads: `crt` (AWS CRT S3 client, native TLS and multipart) or `boto3`. Both send a CRC64NVME checksum that S3 checks on every request | `crt` |
+| `--verify-tar-upload` / `--no-verify-tar-upload` | after each upload, compare the full-object CRC64NVME S3 stored for the tar with the CRC64NVME of the bytes that were packed (one HeadObject per tar, needs `s3:GetObject` on the tars). A mismatch fails the tar and records none of its rows | on |
 | `--tar-layout` | folder level for tars under `--dst-prefix`: `run` = `<prefix>/<run-id>/` (one folder per run, so each full or incremental run can be checked, reconciled or cleaned up as a unit), `date` = `<prefix>/<YYYYMMDD>/` (the earlier layout), `flat` = `<prefix>/`. Existing archives keep working: the manifest stores full tar keys | run |
 | `--spool-max-mb` | in-memory threshold for a tar (spills to disk above it) | 256 |
 | `--compress` | gzip the tar (⚠️ see limitations) | off |
@@ -204,7 +285,7 @@ Restoring a single file back out is covered in [§4.2](#42-restore--extract-an-i
 **Failed files and retry.** Every file that could not be archived — stat errors, unreadable files, and every file of a tar whose upload failed — is streamed to `logs/<dst-prefix>/failed_<run-id>.txt`, one absolute path per line. A `.tsv` next to it holds the reasons. Retry with the same settings:
 
 ```bash
-python v3/fss3-archiver-s3tables-mp.py --src-path <same base> \
+python archiver/fss3-archiver-s3tables-mp.py --src-path <same base> \
   --input-file logs/<dst-prefix>/failed_<run-id>.txt ...   # same parallel pipeline
 ```
 
@@ -310,14 +391,14 @@ WHERE source_key LIKE '%file0499%'
 
 ### 4.2 Restore — extract an individual file via byte-range GET
 
-Use `v3/fss3-restore.py`. It fetches only the byte range holding the file — the archiver records `byte_start` at the file's tar header and `byte_end` at the end of its padding, so that range is a self-contained single-member tar that `tarfile` opens directly. No full-tar download.
+Use `fss3-restore.py`. It fetches only the byte range holding the file — the archiver records `byte_start` at the file's tar header and `byte_end` at the end of its padding, so that range is a self-contained single-member tar that `tarfile` opens directly. No full-tar download.
 
 **Note:** the manifest stores `tar_key` but **not** the bucket, so `--tar-bucket` is always required.
 
 **DIRECT mode** — you already have the offsets (e.g. from the 4.1 query):
 
 ```bash
-python v3/fss3-restore.py \
+python archiver/fss3-restore.py \
   --tar-bucket       your-own-dest-bucket \
   --tar-key          20260804/20260804/archive_20260804_120000_31417_a3f1_00001.tar \
   --byte-start       1536 \
@@ -328,7 +409,7 @@ python v3/fss3-restore.py \
 **LOOKUP mode** — you only know the original path; the script queries the manifest (exact `source_key` match with Iceberg predicate pushdown — no full-table scan) and resolves the offsets itself:
 
 ```bash
-python v3/fss3-restore.py \
+python archiver/fss3-restore.py \
   --region           ap-northeast-2 \
   --table-bucket-arn arn:aws:s3tables:ap-northeast-2:<account>:bucket/<table-bucket> \
   --namespace        small_files_archive \
@@ -424,7 +505,7 @@ Not included: data transfer, S3 Tables maintenance (compaction at $0.005 per GB 
 
 Files were sampled from the first, middle, and last tars and restored from the actual tar via byte-range GET using the offset in the S3 Tables manifest. **Filename, size, and MD5 all matched.** The correctness of single-pass MD5 and physical tar offsets was confirmed against real S3.
 
-`v3/fss3-restore.py` itself was also verified end-to-end against real S3 + S3 Tables (a 523,123-row manifest, MD5 on). Both **DIRECT** and **LOOKUP** modes restored individual files via byte-range GET; the extracted bytes matched the manifest MD5 and were **byte-identical (`cmp`) to the originals**. Failure paths behaved correctly too — a wrong `--verify-md5`, a missing `source_key`, and specifying both modes at once each exited non-zero with a clear message.
+`fss3-restore.py` itself was also verified end-to-end against real S3 + S3 Tables (a 523,123-row manifest, MD5 on). Both **DIRECT** and **LOOKUP** modes restored individual files via byte-range GET; the extracted bytes matched the manifest MD5 and were **byte-identical (`cmp`) to the originals**. Failure paths behaved correctly too — a wrong `--verify-md5`, a missing `source_key`, and specifying both modes at once each exited non-zero with a clear message.
 
 ---
 
@@ -451,7 +532,7 @@ Yes. Amazon S3 Tables explicitly supports concurrent writers to a single table (
 # each run gets its own run_id automatically.
 for sub in fs1 fs2 fs3; do
   find /data/nfsshare/$sub -type f > /tmp/list.$sub
-  python3 v3/fss3-archiver-s3tables-mp.py \
+  python3 archiver/fss3-archiver-s3tables-mp.py \
       --src-path /data/nfsshare --input-file /tmp/list.$sub ... &
 done
 wait
@@ -462,7 +543,7 @@ The trade-off is that `--input-file` enumerates up front instead of streaming, s
 **Pre-create the namespace and table once** before launching, so the runs don't race on creation:
 
 ```bash
-python3 v3/fss3-archiver-s3tables-mp.py --src-path /empty/dir --max-files 1 ...  # creates ns + table
+python3 archiver/fss3-archiver-s3tables-mp.py --src-path /empty/dir --max-files 1 ...  # creates ns + table
 ```
 
 **Watch the commit rate.** Each run commits every `--batch-size` rows or `--flush-interval` seconds, whichever comes first. With many runs on one table, raise `--flush-interval` to cut the commit rate — and with it both the conflict probability and the snapshot churn. The run summary reports `N commits (M commit retries)`; `M` is your conflict gauge, and `manifest-writer: append failed` warnings in the log are the same signal live.
@@ -487,4 +568,5 @@ If the source really is latency-bound (a network mount, not a local disk), raisi
 - **Throughput depends on network bandwidth.** For on-premises → S3 transfers, bandwidth is likely the bottleneck.
 - **For large runs, keep `--batch-size` large** (default 50,000). Small values create many small files in the manifest and can slow queries.
 - **Tar upload and manifest commit are not atomic.** If the process crashes after a tar uploads but before its rows commit to S3 Tables, that tar is an orphan — archived but not findable/restorable. To detect orphans after a run, reconcile the tar objects under the destination prefix against the distinct `tar_key` values in the manifest.
+- **On Amazon Linux / RHEL / SUSE, pyarrow's S3 client (which writes the manifest) can fail TLS with `curlCode: 60`** because it expects the Debian CA path. The archiver sets `SSL_CERT_FILE` to the system bundle automatically. It also checks that the manifest is reachable before uploading the first tar, so a broken trust store stops the run with no orphan tars. To override, set `SSL_CERT_FILE` yourself.
 - Tested with Python 3.12.1 / pyiceberg 0.11.1.

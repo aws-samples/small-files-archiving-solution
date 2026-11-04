@@ -1,7 +1,10 @@
-sandbox
-tmp
-__pycache__
-*old
-scripts
-logs/
+# Python
+__pycache__/
+*.pyc
 .venv/
+# runtime output of the archivers / GUI
+logs/
+tmp/
+# editors / OS
+.DS_Store
+*.old
