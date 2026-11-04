@@ -37,6 +37,26 @@ REMOTE_ROOT = "/opt/sfa-runner"
 REMOTE_WORK = "/var/lib/sfa"
 
 
+def runner_hashes():
+    """[(file name, sha256 hex)] of exactly what upload_runner() puts in S3."""
+    out = [("requirements.txt", hashlib.sha256(REQUIREMENTS.encode()).hexdigest())]
+    for f in RUNNER_FILES:
+        with open(os.path.join(ARCHIVER_DIR, f), "rb") as fh:
+            out.append((f, hashlib.sha256(fh.read()).hexdigest()))
+    return out
+
+
+def verify_runner_line(bucket, ver):
+    """One shell line, run right after the runner files are downloaded into
+    "$D": every file must match the SHA-256 computed from this GUI's own copy,
+    so code changed in the bucket is never run on the instance."""
+    sums = "".join(f"{h}  {n}\\n" for n, h in runner_hashes())
+    return ('  ( cd "$D" && { command -v sha256sum >/dev/null && S=sha256sum || S="shasum -a 256"; '
+            f"printf '{sums}' | $S -c --status -; }} ) || {{ "
+            f'echo "The archiver files in s3://{bucket}/_sfa/runner/{ver}/ do not match this GUI (SHA-256): '
+            f'refusing to run them. Delete that folder and try again."; rm -rf "$D"; exit 1; }}')
+
+
 class Raw(str):
     """A script argument that is already shell-quoted (e.g. "$SRC_PATH"/docs)."""
 
@@ -66,6 +86,10 @@ def ec2_script(cfg, ver, script, args, setup=(), title="run"):
     (variables to edit, checks, fetching an input list)."""
     from datetime import datetime
     q = shlex.quote
+    for v in list(args) + [str(x) for x in setup]:
+        if "\n" in str(v) or "\r" in str(v):
+            raise ValueError("A path or value contains a line break, which can't be put into a pasted "
+                             "script safely. Rename it, or run this archive from the GUI instead.")
     pairs, i = [], 0                       # one "--option value" per line
     qa = lambda a: a if isinstance(a, Raw) else q(a)
     while i < len(args):
@@ -85,6 +109,7 @@ D="$HOME/sfa-runner/{ver}"; W="$HOME/sfa-work"
 if [ ! -f "$D/.ready" ]; then       # first time only: this archiver version + a private Python 3.12
   mkdir -p "$D"
   aws s3 cp --recursive --only-show-errors {q(f"s3://{cfg.bucket}/_sfa/runner/{ver}/")} "$D/" --region {q(cfg.region)}
+{verify_runner_line(cfg.bucket, ver)}
   UV=$(command -v uv || echo "$HOME/.local/bin/uv")
   [ -x "$UV" ] || {{ curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null; UV="$HOME/.local/bin/uv"; }}
   "$UV" venv --quiet --python 3.12 "$D/.venv"
@@ -213,6 +238,7 @@ class Remote:
             '  rm -rf "$D/.venv"',
             f'  mkdir -p "$D" && aws s3 cp --recursive --only-show-errors '
             f's3://{self.cfg.bucket}/_sfa/runner/{ver}/ "$D/" --region {r}',
+            verify_runner_line(self.cfg.bucket, ver),
             '  UV=$(command -v uv || true); [ -n "$UV" ] || UV=/root/.local/bin/uv',
             '  if [ ! -x "$UV" ]; then curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null; UV=/root/.local/bin/uv; fi',
             '  "$UV" venv --quiet --python 3.12 "$D/.venv"',
