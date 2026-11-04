@@ -7,7 +7,7 @@
 원본은 [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution)이며, 이 버전은 매니페스트 저장을 CSV 오브젝트에서 S3 Tables로 전환하고, 단일 읽기 MD5·스트리밍 tar·배치 커밋·멀티프로세스 병렬화를 적용해 재구성했습니다.
 
 <p align="center">
-  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="1-minute intro: why small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
+  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="1-minute intro: 482,980 objects become 48 tars; setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
   <b>▶ 미리보기를 클릭하면 1분 소개 영상(MP4, AWS에서 녹화)을 볼 수 있습니다</b>
 </p>
 
@@ -17,7 +17,7 @@
 
 ![메인 화면: 왼쪽은 로컬 디스크, 오른쪽은 아카이브의 원본 파일, 아래는 작업 모니터링](gui/docs/images/21-browse-files.png)
 
-▶ **[1분 소개 영상](gui/docs/demo.mp4)**: 소용량 파일이 왜 비싼지, 그리고 설정, 두 가지 소스(로컬 디스크 또는 S3 버킷), EC2에서 S3 버킷의 객체 482,980개 아카이빙, 파일 보기와 tar 보기 전환, 복원. **[2분 둘러보기](gui/docs/demo-walkthrough.mp4)**: 로컬 디스크의 파일 523,124개 아카이빙, 탐색, 복원, incremental 실행.
+▶ **[1분 소개 영상](gui/docs/demo.mp4)**: 소용량 객체 482,980개가 tar 48개가 되어도 모든 파일을 그대로 탐색할 수 있는 과정 — 설정, 두 가지 소스(로컬 디스크 또는 S3 버킷), EC2에서 S3 버킷의 객체 482,980개 아카이빙, 파일 보기와 tar 보기 전환, 복원. **[2분 둘러보기](gui/docs/demo-walkthrough.mp4)**: 로컬 디스크의 파일 523,124개 아카이빙, 탐색, 복원, incremental 실행.
 
 ```bash
 cd gui && ./run-gui.sh      # 첫 실행 시 자체 Python 환경을 만듭니다

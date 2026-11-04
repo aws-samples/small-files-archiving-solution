@@ -7,7 +7,7 @@ An archiving solution that **bundles** large numbers of small filesystem files i
 Based on [aws-samples/small-files-archiving-solution](https://github.com/aws-samples/small-files-archiving-solution), this version moves the manifest from CSV objects to S3 Tables and reworks the internals with single-pass MD5, streaming tar, batched commits, and multiprocess parallelism.
 
 <p align="center">
-  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="1-minute intro: why small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
+  <a href="gui/docs/demo.mp4"><img src="gui/docs/demo-preview.gif" width="860" alt="1-minute intro: 482,980 objects become 48 tars; setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
   <b>▶ Click the preview for the 1-minute intro video (MP4, recorded on AWS)</b>
 </p>
 
@@ -17,7 +17,7 @@ The easiest way to use the solution is the desktop app in [`gui`](gui/README.md)
 
 ![Main window: local disk on the left, the archive's original files on the right, jobs at the bottom](gui/docs/images/21-browse-files.png)
 
-▶ **[1-minute intro](gui/docs/demo.mp4)**: why millions of small files cost so much, then setup, the two kinds of source (local disk or S3 bucket), archiving 482,980 objects from an S3 bucket on EC2, browsing as files or as tars, and restore. **[2-minute walkthrough](gui/docs/demo-walkthrough.mp4)**: archiving 523,124 files from a local disk, browsing, restore and an incremental run.
+▶ **[1-minute intro](gui/docs/demo.mp4)**: how 482,980 small objects become 48 tars, every file still browsable — setup, the two kinds of source (local disk or S3 bucket), archiving 482,980 objects from an S3 bucket on EC2, browsing as files or as tars, and restore. **[2-minute walkthrough](gui/docs/demo-walkthrough.mp4)**: archiving 523,124 files from a local disk, browsing, restore and an incremental run.
 
 ```bash
 cd gui && ./run-gui.sh      # first run creates its own Python environment

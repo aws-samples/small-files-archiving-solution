@@ -5,7 +5,7 @@ Small Files Archiver bundles millions of small files into large tar objects in A
 This guide walks through the desktop app in the order you'll use it: **setup → archive → browse → restore**, then incremental runs, file-list reports and retrying failures.
 
 <p align="center">
-  <a href="docs/demo.mp4"><img src="docs/demo-preview.gif" width="860" alt="1-minute intro: why small files cost so much, then setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
+  <a href="docs/demo.mp4"><img src="docs/demo-preview.gif" width="860" alt="1-minute intro: 482,980 objects become 48 tars; setup, archiving 482,980 objects from an S3 bucket on EC2, browsing and restore"></a><br>
   <b>▶ Click the preview for the 1-minute intro (MP4, 1.5 MB, recorded on AWS). Longer tour: the <a href="docs/demo-walkthrough.mp4">2-minute walkthrough</a> (local disk, incremental runs).</b>
 </p>
 
