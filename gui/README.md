@@ -29,7 +29,7 @@ This guide walks through the desktop app in the order you'll use it: **setup →
 
 ## 1. Install and launch
 
-Requirements: macOS (the tested platform), Python 3.12 (installed automatically if you have [`uv`](https://docs.astral.sh/uv/)), and an AWS CLI profile (`aws configure` or `aws configure sso`). The app is plain PySide6 and should also run on Linux; *Show failed list* uses Finder and is macOS-only.
+Requirements: macOS or Linux with X11 (both tested: macOS, and Amazon Linux 2023 on EC2, see below), Python 3.12 (installed automatically if you have [`uv`](https://docs.astral.sh/uv/)), and an AWS CLI profile (`aws configure` or `aws configure sso`; on EC2 the instance role is used). *Show failed list* opens Finder on macOS only.
 
 ```bash
 cd gui
@@ -37,6 +37,48 @@ cd gui
 ```
 
 The app makes outbound AWS API calls only. It opens no network ports.
+
+### Run the GUI on an EC2 Linux instance (Amazon DCV)
+
+Running the GUI on EC2 in the bucket's Region keeps browsing, restores and S3-source archives inside AWS, with no data transfer out. Tested on **Amazon Linux 2023** (glibc 2.34) with Amazon DCV 2026.0. Amazon Linux 2 doesn't work: Qt 6 needs glibc 2.28 or later.
+
+1. **Qt / X11 libraries and the app** (as root, then as `ec2-user`):
+   ```bash
+   sudo dnf install -y git xorg-x11-server-Xvfb libxkbcommon-x11 xcb-util-wm xcb-util-image \
+     xcb-util-keysyms xcb-util-renderutil xcb-util-cursor libXrender libXi libSM libICE \
+     fontconfig dejavu-sans-fonts dejavu-sans-mono-fonts mesa-libGL mesa-libEGL dbus-libs xterm
+   curl -LsSf https://astral.sh/uv/install.sh | sh          # Python 3.12 for the app (AL2023's python3 is 3.9)
+   git clone https://github.com/aws-samples/small-files-archiving-solution.git
+   ```
+2. **Amazon DCV** (free on EC2; the instance role needs read access to the `dcv-license.<region>` bucket):
+   ```bash
+   sudo rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY
+   curl -LO https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-amzn2023-x86_64.tgz && tar xzf nice-dcv-amzn2023-x86_64.tgz
+   sudo dnf install -y ./nice-dcv-*/nice-dcv-server-*.rpm ./nice-dcv-*/nice-xdcv-*.rpm ./nice-dcv-*/nice-dcv-web-viewer-*.rpm
+   ```
+   In `/etc/dcv/dcv.conf`, keep DCV on loopback only and keep its normal sign-in:
+   ```ini
+   [connectivity]
+   web-listen-endpoints=['127.0.0.1:8443']
+   enable-quic-frontend=false
+   [security]
+   authentication="system"
+   ```
+   Then start it and open a session that launches the app:
+   ```bash
+   sudo systemctl enable --now dcvserver
+   printf '#!/bin/bash\nxterm &\ncd ~/small-files-archiving-solution/gui && exec ./run-gui.sh\n' > ~/sfa-session.sh && chmod 700 ~/sfa-session.sh
+   sudo dcv create-session --type virtual --owner ec2-user --init /home/ec2-user/sfa-session.sh sfa
+   ```
+3. **Connect from your computer, with no inbound ports.** Leave the security group without inbound rules and reach DCV through Session Manager. This needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
+   ```bash
+   aws ssm start-session --target <instance-id>        # once: sudo passwd ec2-user  (DCV signs in with it)
+   aws ssm start-session --target <instance-id> --document-name AWS-StartPortForwardingSession \
+     --parameters '{"portNumber":["8443"],"localPortNumber":["8443"]}'
+   ```
+   Open **https://localhost:8443** (DCV uses a self-signed certificate) and sign in as `ec2-user`. The session opens with the app.
+
+Never open port 8443 (or 22) to the internet: the port forward is the only way in.
 
 ## 2. First-run setup wizard
 
